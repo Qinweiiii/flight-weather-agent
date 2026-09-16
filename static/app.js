@@ -1,824 +1,736 @@
-// ===== 全局状态管理 =====
-const AppState = {
-    userId: null,
-    sessionId: null,
-    isLoading: false,
-    messageHistory: [],
-    userInfo: null,
-    chartInstances: {}  // ECharts 实例缓存，用于响应式调整
-};
+const { useEffect, useRef, useState } = React;
 
-// ===== API 配置 =====
 const API_BASE_URL = window.location.origin;
 
-// ===== API 调用函数 =====
-async function apiCall(endpoint, data = {}) {
-    try {
-        const response = await fetch(`${API_BASE_URL}/api/${endpoint}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        });
-        
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || '请求失败');
-        return result;
-    } catch (error) {
-        console.error('API调用失败:', error);
-        throw error;
+const quickStarts = [
+  {
+    title: "机场延误诊断",
+    body: "最近90天到达延误率最高的10个出发机场是哪些？",
+    icon: "A",
+  },
+  {
+    title: "航司取消率",
+    body: "最近90天取消率最高的5家航司是哪些？请给出航班量和取消率。",
+    icon: "C",
+  },
+  {
+    title: "天气影响归因",
+    body: "比较降水量高于2mm和低于等于2mm时的平均到达延误分钟数。",
+    icon: "W",
+  },
+  {
+    title: "行业基准对比",
+    body: "结合行业基准，对比我们近90天到达延误率并给出优化建议。",
+    icon: "B",
+  },
+];
+
+const navItems = [
+  ["Workbench", "工作台"],
+  ["Memory", "记忆"],
+  ["Trace", "追踪"],
+  ["Skills", "技能"],
+];
+
+function apiCall(endpoint, data = {}) {
+  return fetch(`${API_BASE_URL}/api/${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  }).then(async (response) => {
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "请求失败");
+    return result;
+  });
+}
+
+function renderMarkdown(text) {
+  if (!text) return "";
+  try {
+    if (window.marked) {
+      const raw = window.marked.parse(text, {
+        gfm: true,
+        breaks: true,
+        mangle: false,
+        headerIds: false,
+      });
+      return window.DOMPurify ? window.DOMPurify.sanitize(raw) : raw;
     }
+  } catch (error) {
+    console.warn("Markdown render failed:", error);
+  }
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
 }
 
-// ===== 登录相关 =====
-async function handleLogin() {
-    const userIdInput = document.getElementById('userIdInput');
-    const userId = userIdInput.value.trim() || 'guest';
-    
-    const loginBtn = document.getElementById('loginBtn');
-    loginBtn.disabled = true;
-    loginBtn.textContent = '登录中...';
-    
-    try {
-        const result = await apiCall('login', { user_id: userId });
-        
-        if (result.success) {
-            AppState.userId = result.user_id;
-            AppState.sessionId = result.session_id;
-            AppState.userInfo = result.user_info || null;
-            
-            document.getElementById('loginOverlay').style.display = 'none';
-            document.getElementById('mainApp').style.display = 'flex';
-            
-            updateUserInfo();
-            addSystemMessage(`欢迎回来，${userId}！我已准备好为您服务。`);
-
-            if (AppState.userInfo) {
-                const prefCount = AppState.userInfo.preferences ? Object.keys(AppState.userInfo.preferences).length : 0;
-                const knowCount = Array.isArray(AppState.userInfo.knowledge) ? AppState.userInfo.knowledge.length : 0;
-                if (prefCount > 0 || knowCount > 0) {
-                    addSystemMessage(`已加载您的长期记忆：偏好 ${prefCount} 项，知识 ${knowCount} 条。`);
-                }
-            }
-        }
-    } catch (error) {
-        alert('登录失败: ' + error.message);
-        loginBtn.disabled = false;
-        loginBtn.innerHTML = `
-            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
-                <polyline points="10 17 15 12 10 7"/>
-                <line x1="15" y1="12" x2="3" y2="12"/>
-            </svg>
-            开始使用
-        `;
-    }
+function uniqueId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-function updateUserInfo() {
-    document.getElementById('userName').textContent = AppState.userId || 'Guest';
-    document.getElementById('sessionId').textContent = 
-        AppState.sessionId ? AppState.sessionId.substring(0, 8) + '...' : '-';
-}
+function useSSEChat({ userId, onMemoryRefresh }) {
+  const [messages, setMessages] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState("");
 
-function handleLogout() {
-    if (confirm('确定要退出登录吗？')) {
-        location.reload();
-    }
-}
+  const sendQuestion = async (question) => {
+    const trimmed = question.trim();
+    if (!trimmed || isLoading) return;
 
-// ===== Markdown 渲染 =====
-function renderMarkdown(mdText) {
-    try {
-        if (typeof marked !== 'undefined') {
-            if (!window.__markedConfigured) {
-                marked.setOptions({
-                    gfm: true,
-                    breaks: true,
-                    mangle: false,
-                    headerIds: false,
-                    highlight: function(code, lang) {
-                        try {
-                            if (typeof hljs !== 'undefined') {
-                                if (lang && hljs.getLanguage(lang)) {
-                                    return hljs.highlight(code, { language: lang }).value;
-                                }
-                                return hljs.highlightAuto(code).value;
-                            }
-                        } catch (e) {}
-                        return code;
-                    }
-                });
-                window.__markedConfigured = true;
-            }
-            let html = marked.parse(mdText);
-            if (typeof DOMPurify !== 'undefined') {
-                html = DOMPurify.sanitize(html);
-            }
-            return html;
-        }
-    } catch (e) {
-        console.warn('Markdown 渲染失败:', e);
-    }
-    return escapeHtml(mdText);
-}
+    setError("");
+    setIsLoading(true);
 
-// ===== ECharts 图表渲染 =====
-function renderChart(container, chartConfig) {
-    if (!container || !chartConfig || typeof echarts === 'undefined') return;
-    
-    try {
-        const chartId = container.id;
-        
-        // 销毁旧实例
-        if (AppState.chartInstances[chartId]) {
-            AppState.chartInstances[chartId].dispose();
-        }
-        
-        container.style.height = '320px';
-        container.style.width = '100%';
-        
-        const chart = echarts.init(container, null, { renderer: 'canvas' });
-        
-        // 注入通用样式
-        const defaultConfig = {
-            backgroundColor: 'transparent',
-            grid: { left: '3%', right: '4%', bottom: '8%', containLabel: true },
-            tooltip: { trigger: 'axis' },
-            ...chartConfig
-        };
-        
-        chart.setOption(defaultConfig);
-        AppState.chartInstances[chartId] = chart;
-        
-        // 响应式
-        const resizeObserver = new ResizeObserver(() => chart.resize());
-        resizeObserver.observe(container);
-        
-    } catch (e) {
-        console.warn('图表渲染失败:', e);
-        container.innerHTML = `<div style="padding:8px;color:#888;font-size:12px;">图表渲染失败: ${e.message}</div>`;
-    }
-}
-
-// ===== 消息相关 =====
-function addMessage(text, isUser = false, meta = {}) {
-    const chatMessages = document.getElementById('chatMessages');
-    
-    const welcomeMessage = chatMessages.querySelector('.welcome-message');
-    if (welcomeMessage) welcomeMessage.remove();
-    
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${isUser ? 'user' : 'assistant'}`;
-    
-    const now = new Date();
-    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-    
-    const bubbleInner = isUser 
-        ? `${escapeHtml(text)}`
-        : `<div class="markdown-body">${renderMarkdown(text)}</div>`;
-
-    messageDiv.innerHTML = `
-        <div class="message-avatar">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                ${isUser 
-                    ? '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'
-                    : '<path d="M12 2L2 7L12 12L22 7L12 2Z"/><path d="M2 17L12 22L22 17"/><path d="M2 12L12 17L22 12"/>'
-                }
-            </svg>
-        </div>
-        <div class="message-content">
-            <div class="message-bubble">${bubbleInner}</div>
-            <div class="message-time">${timeStr}</div>
-        </div>
-    `;
-    
-    chatMessages.appendChild(messageDiv);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-    
-    if (!isUser && typeof hljs !== 'undefined') {
-        messageDiv.querySelectorAll('pre code').forEach(block => {
-            try { hljs.highlightElement(block); } catch (e) {}
-        });
-    }
-    
-    AppState.messageHistory.push({ text, isUser, time: timeStr });
-    return messageDiv;
-}
-
-function addSystemMessage(text) {
-    addMessage('ℹ️ ' + text, false);
-}
-
-// ===== 流式消息构建器 =====
-function createStreamingMessage() {
-    const chatMessages = document.getElementById('chatMessages');
-    
-    const welcomeMessage = chatMessages.querySelector('.welcome-message');
-    if (welcomeMessage) welcomeMessage.remove();
-    
-    const msgId = 'stream_' + Date.now();
-    const now = new Date();
-    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-    
-    const messageDiv = document.createElement('div');
-    messageDiv.className = 'message assistant';
-    messageDiv.id = msgId;
-    
-    messageDiv.innerHTML = `
-        <div class="message-avatar">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 2L2 7L12 12L22 7L12 2Z"/>
-                <path d="M2 17L12 22L22 17"/>
-                <path d="M2 12L12 17L22 12"/>
-            </svg>
-        </div>
-        <div class="message-content">
-            <div class="message-bubble">
-                <div class="stream-status" id="${msgId}_status">
-                    <div class="loading-indicator">
-                        <div class="loading-dot"></div>
-                        <div class="loading-dot"></div>
-                        <div class="loading-dot"></div>
-                    </div>
-                    <span class="status-text">正在处理...</span>
-                </div>
-                <div class="stream-plan" id="${msgId}_plan" style="display:none;"></div>
-                <div class="stream-trace" id="${msgId}_trace" style="display:none;"></div>
-                <div class="stream-quality" id="${msgId}_quality" style="display:none;"></div>
-                <div class="stream-sql-container" id="${msgId}_sql" style="display:none;"></div>
-                <div class="stream-sources" id="${msgId}_sources" style="display:none;"></div>
-                <div class="markdown-body stream-answer" id="${msgId}_answer"></div>
-                <div class="stream-chart" id="${msgId}_chart" style="display:none;"></div>
-            </div>
-            <div class="message-time">${timeStr}</div>
-        </div>
-    `;
-    
-    chatMessages.appendChild(messageDiv);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-    
-    return {
-        msgId,
-        messageDiv,
-        
-        setStatus(text) {
-            const el = document.getElementById(`${msgId}_status`);
-            if (el) {
-                el.innerHTML = `
-                    <div class="loading-indicator">
-                        <div class="loading-dot"></div>
-                        <div class="loading-dot"></div>
-                        <div class="loading-dot"></div>
-                    </div>
-                    <span class="status-text">${escapeHtml(text)}</span>
-                `;
-            }
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        },
-        
-        hideStatus() {
-            const el = document.getElementById(`${msgId}_status`);
-            if (el) el.style.display = 'none';
-        },
-
-        showPlan(plan) {
-            const el = document.getElementById(`${msgId}_plan`);
-            if (!el || !plan) return;
-            const steps = Array.isArray(plan.steps) ? plan.steps : [];
-            el.style.display = 'block';
-            el.innerHTML = `
-                <details class="sql-details" open>
-                    <summary>Planner Agent 任务计划</summary>
-                    <div style="padding:8px 12px;font-size:12px;color:#475569;">
-                        <div><strong>目标:</strong> ${escapeHtml(plan.goal || '未提供')}</div>
-                        <ol style="margin:8px 0 0 18px;">
-                            ${steps.map(s => `<li>[${escapeHtml(String(s.agent || 'agent'))}] ${escapeHtml(String(s.task || ''))}</li>`).join('')}
-                        </ol>
-                    </div>
-                </details>
-            `;
-        },
-
-        addTrace(step, detail) {
-            const el = document.getElementById(`${msgId}_trace`);
-            if (!el) return;
-            el.style.display = 'block';
-            const line = document.createElement('div');
-            line.style.fontSize = '12px';
-            line.style.color = '#64748b';
-            line.style.margin = '4px 0';
-            line.textContent = `· ${step}: ${detail}`;
-            el.appendChild(line);
-        },
-
-        showQuality(quality) {
-            const el = document.getElementById(`${msgId}_quality`);
-            if (!el || !quality) return;
-
-            const q = quality.search_quality || {};
-            const debate = quality.debate || {};
-            const score = debate.scorecard || {};
-            const total = Number(score.total || 0);
-            const threshold = Number(score.threshold || 13);
-            const labelRaw = String(quality.confidence_label || '').trim();
-            let confidenceLabel = labelRaw || '中';
-            if (!labelRaw) {
-                if (q.evidence_enough === false || debate.status === 'low_evidence' || debate.status === 'skipped_low_evidence') {
-                    confidenceLabel = '低';
-                } else if (Number.isFinite(total) && total >= Math.max(16, threshold + 3)) {
-                    confidenceLabel = '高';
-                }
-            }
-            const confClass = confidenceLabel === '高' ? 'high' : (confidenceLabel === '低' ? 'low' : 'medium');
-
-            const chips = [];
-            if (typeof q.evidence_enough === 'boolean') {
-                chips.push(`<span class="quality-chip ${q.evidence_enough ? 'ok' : 'warn'}">外部证据: ${q.evidence_enough ? '充足' : '不足'}</span>`);
-            }
-            if (debate.status) {
-                chips.push(`<span class="quality-chip ${debate.status === 'ok' ? 'ok' : 'warn'}">Debate: ${escapeHtml(String(debate.status))}</span>`);
-            }
-
-            const metric = (label, value) => {
-                if (value === undefined || value === null || value === '') return '';
-                return `<div class="quality-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`;
-            };
-
-            el.style.display = 'block';
-            el.innerHTML = `
-                <div class="quality-header">
-                    <span>决策质量卡</span>
-                    <span class="quality-score ${confClass}">可信度 ${confidenceLabel}</span>
-                </div>
-                <div class="quality-chips">${chips.join('')}</div>
-                <div class="quality-grid">
-                    ${metric('总分/阈值', `${total}/${threshold}`)}
-                    ${metric('SQL 证据分', score.sql_score)}
-                    ${metric('外部证据分', score.external_score)}
-                    ${metric('行业口径分', score.industry_score)}
-                    ${metric('时间可比分', score.time_score)}
-                </div>
-                ${score.time_reason ? `<div class="quality-note">时间口径: ${escapeHtml(String(score.time_reason))}</div>` : ''}
-            `;
-        },
-        
-        showSQL(sql, retryCount) {
-            const el = document.getElementById(`${msgId}_sql`);
-            if (!el) return;
-            const retryBadge = retryCount > 0 
-                ? `<span class="retry-badge">自动修复 ${retryCount} 次</span>` 
-                : '';
-            el.style.display = 'block';
-            el.innerHTML = `
-                <details class="sql-details">
-                    <summary>查看生成的 SQL ${retryBadge}</summary>
-                    <pre><code class="language-sql">${escapeHtml(sql)}</code></pre>
-                </details>
-            `;
-            if (typeof hljs !== 'undefined') {
-                el.querySelectorAll('pre code').forEach(b => {
-                    try { hljs.highlightElement(b); } catch(e) {}
-                });
-            }
-        },
-        
-        showSources(sources) {
-            const el = document.getElementById(`${msgId}_sources`);
-            if (!el || !sources || !sources.length) return;
-            const validSources = sources.filter(s => s && s.length > 0).slice(0, 5);
-            if (!validSources.length) return;
-            el.style.display = 'block';
-            el.innerHTML = `
-                <div class="sources-header">🌐 参考来源</div>
-                <ul class="sources-list">
-                    ${validSources.map((url, i) => {
-                        const domain = (() => { try { return new URL(url).hostname; } catch { return url; } })();
-                        return `<li><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">[${i+1}] ${escapeHtml(domain)}</a></li>`;
-                    }).join('')}
-                </ul>
-            `;
-        },
-        
-        appendChunk(chunk) {
-            const el = document.getElementById(`${msgId}_answer`);
-            if (!el) return;
-            // 累积原始文本，然后重新渲染 Markdown
-            el._rawText = (el._rawText || '') + chunk;
-            el.innerHTML = renderMarkdown(el._rawText);
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        },
-        
-        showChart(chartConfig) {
-            const el = document.getElementById(`${msgId}_chart`);
-            if (!el || !chartConfig) return;
-            el.style.display = 'block';
-            el.id = `${msgId}_chart_canvas`;
-            renderChart(el, chartConfig);
-        },
-        
-        finalize(fullAnswer) {
-            this.hideStatus();
-            AppState.messageHistory.push({ text: fullAnswer, isUser: false, time: timeStr });
-        }
+    const userMessage = {
+      id: uniqueId("user"),
+      role: "user",
+      text: trimmed,
+      createdAt: new Date(),
     };
-}
+    const assistantId = uniqueId("assistant");
+    const assistantMessage = {
+      id: assistantId,
+      role: "assistant",
+      text: "",
+      status: "正在建立请求...",
+      intent: "",
+      traces: [],
+      plan: null,
+      sql: null,
+      retryCount: 0,
+      sources: [],
+      quality: null,
+      chart: null,
+      error: "",
+      createdAt: new Date(),
+    };
 
-function showLoading() {
-    const chatMessages = document.getElementById('chatMessages');
-    
-    const loadingDiv = document.createElement('div');
-    loadingDiv.className = 'message assistant';
-    loadingDiv.id = 'loadingMessage';
-    
-    loadingDiv.innerHTML = `
-        <div class="message-avatar">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 2L2 7L12 12L22 7L12 2Z"/>
-                <path d="M2 17L12 22L22 17"/>
-                <path d="M2 12L12 17L22 12"/>
-            </svg>
-        </div>
-        <div class="message-content">
-            <div class="message-bubble">
-                <div class="loading-indicator">
-                    <div class="loading-dot"></div>
-                    <div class="loading-dot"></div>
-                    <div class="loading-dot"></div>
-                </div>
-            </div>
-        </div>
-    `;
-    
-    chatMessages.appendChild(loadingDiv);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-}
+    setMessages((prev) => [...prev, userMessage, assistantMessage]);
 
-function hideLoading() {
-    const loadingMessage = document.getElementById('loadingMessage');
-    if (loadingMessage) loadingMessage.remove();
-}
+    const patchAssistant = (patch) => {
+      setMessages((prev) =>
+        prev.map((message) => {
+          if (message.id !== assistantId) return message;
+          const nextPatch = typeof patch === "function" ? patch(message) : patch;
+          return { ...message, ...nextPatch };
+        })
+      );
+    };
 
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML.replace(/\n/g, '<br>');
-}
-
-// ===== 查询处理（流式版本）=====
-async function handleQuery(question) {
-    if (!question.trim()) return;
-    
-    if (AppState.isLoading) {
-        alert('请等待当前查询完成');
-        return;
-    }
-    
-    AppState.isLoading = true;
-    const sendBtn = document.getElementById('sendBtn');
-    sendBtn.disabled = true;
-    
-    // 显示用户消息
-    addMessage(question, true);
-    
-    // 创建流式消息容器
-    const streamMsg = createStreamingMessage();
-    
     try {
-        const response = await fetch(`${API_BASE_URL}/api/query_stream`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                user_id: AppState.userId,
-                question: question
-            })
-        });
-        
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-        
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let buffer = '';
-        let fullAnswer = '';
-        let pendingChart = null;
-        
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            
-            buffer += decoder.decode(value, { stream: true });
-            
-            // 按 SSE 分隔符拆分事件
-            const parts = buffer.split('\n\n');
-            buffer = parts.pop(); // 保留不完整的最后一段
-            
-            for (const part of parts) {
-                const line = part.trim();
-                if (!line.startsWith('data: ')) continue;
-                
-                try {
-                    const event = JSON.parse(line.slice(6));
-                    
-                    switch (event.type) {
-                        case 'status':
-                            streamMsg.setStatus(event.message || '处理中...');
-                            break;
-                        
-                        case 'intent':
-                            // 根据意图调整状态提示
-                            const intentLabels = {
-                                'simple_answer': '简单回答',
-                                'sql_only': 'SQL 查询',
-                                'analysis_only': '数据分析',
-                                'sql_and_analysis': 'SQL + 分析',
-                                'web_search': '🌐 联网搜索',
-                                'search_and_sql': '🌐 搜索 + SQL 对比'
-                            };
-                            const label = intentLabels[event.intent] || event.intent;
-                            streamMsg.setStatus(`意图识别：${label}`);
-                            break;
+      const response = await fetch(`${API_BASE_URL}/api/query_stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: userId, question: trimmed }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-                        case 'plan':
-                            streamMsg.showPlan(event.plan || null);
-                            break;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      let fullAnswer = "";
 
-                        case 'trace':
-                            streamMsg.addTrace(event.step || 'trace', event.detail || '');
-                            break;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop();
 
-                        case 'quality':
-                            streamMsg.showQuality(event.quality || null);
-                            break;
-                        
-                        case 'sql':
-                            streamMsg.showSQL(event.sql || '', event.retry_count || 0);
-                            break;
-                        
-                        case 'sources':
-                            streamMsg.showSources(event.sources || []);
-                            break;
-                        
-                        case 'chart':
-                            // 先缓存图表配置，等文字回答结束后再渲染（避免布局抖动）
-                            pendingChart = event.config;
-                            break;
-                        
-                        case 'chunk':
-                            streamMsg.hideStatus();
-                            streamMsg.appendChunk(event.content || '');
-                            fullAnswer += (event.content || '');
-                            break;
-                        
-                        case 'error':
-                            console.warn('SSE error event:', event.message);
-                            streamMsg.setStatus('⚠️ ' + (event.message || '发生错误'));
-                            break;
-                        
-                        case 'done':
-                            if (event.answer && !fullAnswer) {
-                                fullAnswer = event.answer;
-                                streamMsg.appendChunk(fullAnswer);
-                            }
-                            // 渲染图表（在答案之后）
-                            if (pendingChart) {
-                                streamMsg.showChart(pendingChart);
-                            }
-                            streamMsg.finalize(fullAnswer);
-                            break;
-                    }
-                } catch (parseErr) {
-                    console.warn('SSE 事件解析失败:', parseErr, line);
-                }
-            }
-        }
-        
-        // 渲染代码高亮
-        if (typeof hljs !== 'undefined') {
-            document.getElementById(streamMsg.msgId)?.querySelectorAll('pre code').forEach(b => {
-                try { hljs.highlightElement(b); } catch(e) {}
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith("data: ")) continue;
+          const event = JSON.parse(line.slice(6));
+
+          if (event.type === "status") patchAssistant({ status: event.message || "处理中..." });
+          if (event.type === "intent") patchAssistant({ intent: event.intent || "" });
+          if (event.type === "plan") patchAssistant({ plan: event.plan || null });
+          if (event.type === "trace") {
+            patchAssistant((message) => ({
+              traces: [...(message.traces || []), {
+                step: event.step || "trace",
+                detail: event.detail || "",
+              }],
+            }));
+          }
+          if (event.type === "quality") patchAssistant({ quality: event.quality || null });
+          if (event.type === "sql") {
+            patchAssistant({
+              sql: event.sql || "",
+              retryCount: event.retry_count || 0,
             });
+          }
+          if (event.type === "sources") patchAssistant({ sources: event.sources || [] });
+          if (event.type === "chart") patchAssistant({ chart: event.config || null });
+          if (event.type === "chunk") {
+            fullAnswer += event.content || "";
+            patchAssistant({ text: fullAnswer, status: "" });
+          }
+          if (event.type === "error") {
+            patchAssistant({
+              error: event.message || "处理过程中出现错误",
+              status: event.message || "处理过程中出现错误",
+            });
+          }
+          if (event.type === "done") {
+            if (event.answer && !fullAnswer) {
+              fullAnswer = event.answer;
+              patchAssistant({ text: fullAnswer });
+            }
+            patchAssistant({ status: "" });
+          }
         }
-        
-    } catch (error) {
-        streamMsg.hideStatus();
-        streamMsg.appendChunk('抱歉，发生错误：' + error.message);
-        streamMsg.finalize('');
-        console.error('流式查询失败:', error);
+      }
+
+      if (onMemoryRefresh) onMemoryRefresh();
+    } catch (err) {
+      const message = err.message || "请求失败";
+      setError(message);
+      patchAssistant({
+        text: `抱歉，发生错误：${message}`,
+        error: message,
+        status: "",
+      });
     } finally {
-        AppState.isLoading = false;
-        sendBtn.disabled = false;
+      setIsLoading(false);
     }
+  };
+
+  const resetMessages = (note = "") => {
+    setMessages(note ? [{
+      id: uniqueId("system"),
+      role: "assistant",
+      text: note,
+      createdAt: new Date(),
+    }] : []);
+  };
+
+  return { messages, isLoading, error, sendQuestion, resetMessages };
 }
 
-function handleSend() {
-    const input = document.getElementById('questionInput');
-    const question = input.value.trim();
-    
-    if (question) {
-        handleQuery(question);
-        input.value = '';
-        input.style.height = 'auto';
-    }
-}
+function App() {
+  const [user, setUser] = useState(null);
+  const [userInfo, setUserInfo] = useState(null);
+  const [activePanel, setActivePanel] = useState("Workbench");
+  const [skills, setSkills] = useState([]);
+  const [toast, setToast] = useState("");
 
-// ===== 会话管理 =====
-async function handleNewSession() {
-    if (!confirm('确定要开始新会话吗？当前对话历史将被清空（您的长期记忆会保留）。')) return;
-    
+  const refreshUserInfo = async () => {
+    if (!user?.userId) return;
     try {
-        const result = await apiCall('new_session', { user_id: AppState.userId });
-        
-        if (result.success) {
-            AppState.sessionId = result.session_id;
-            AppState.messageHistory = [];
-            
-            // 销毁所有图表实例
-            Object.values(AppState.chartInstances).forEach(chart => {
-                try { chart.dispose(); } catch (e) {}
-            });
-            AppState.chartInstances = {};
-            
-            const chatMessages = document.getElementById('chatMessages');
-            chatMessages.innerHTML = `
-                <div class="welcome-message">
-                    <h2>🔄 新会话已开始</h2>
-                    <p>您可以开始新的对话了。</p>
-                </div>
-            `;
-            
-            updateUserInfo();
-            addSystemMessage('新会话已创建，会话ID: ' + result.session_id.substring(0, 8) + '...');
-        }
+      const result = await apiCall("user_info", { user_id: user.userId });
+      if (result.success) setUserInfo(result.user_info);
     } catch (error) {
-        alert('创建新会话失败: ' + error.message);
+      console.warn("Failed to refresh user info:", error);
     }
-}
+  };
 
-// ===== 用户信息 =====
-async function handleShowUserInfo() {
-    try {
-        let userInfo = AppState.userInfo;
-        if (!userInfo) {
-            const result = await apiCall('user_info', { user_id: AppState.userId });
-            if (result.success) {
-                userInfo = result.user_info;
-                AppState.userInfo = userInfo;
-            }
-        }
-        
-        if (userInfo) {
-            const modal = document.getElementById('userInfoModal');
-            const content = document.getElementById('userInfoContent');
-            
-            let html = `
-                <div class="info-item">
-                    <div class="info-label">用户ID</div>
-                    <div class="info-value">${userInfo.user_id || '-'}</div>
-                </div>
-                <div class="info-item">
-                    <div class="info-label">会话ID</div>
-                    <div class="info-value">${userInfo.session_id || '-'}</div>
-                </div>
-            `;
+  const { messages, isLoading, error, sendQuestion, resetMessages } = useSSEChat({
+    userId: user?.userId,
+    onMemoryRefresh: refreshUserInfo,
+  });
 
-            if (userInfo.profile) {
-                html += `
-                    <div class="info-item">
-                        <div class="info-label">创建时间</div>
-                        <div class="info-value">${userInfo.profile.created_at || '-'}</div>
-                    </div>
-                    <div class="info-item">
-                        <div class="info-label">最后活跃</div>
-                        <div class="info-value">${userInfo.profile.last_active || '-'}</div>
-                    </div>
-                `;
-            }
-            
-            if (userInfo.preferences && Object.keys(userInfo.preferences).length > 0) {
-                html += `<div class="info-item"><div class="info-label">用户偏好</div><ul class="preferences-list">`;
-                for (const [key, value] of Object.entries(userInfo.preferences)) {
-                    html += `<li><strong>${key}:</strong> ${value}</li>`;
-                }
-                html += `</ul></div>`;
-            } else {
-                html += `
-                    <div class="info-item">
-                        <div class="info-label">用户偏好</div>
-                        <div class="info-value" style="color: var(--text-tertiary);">
-                            暂无偏好记录。继续使用系统，我们会自动学习您的偏好。
-                        </div>
-                    </div>
-                `;
-            }
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/api/skills`)
+      .then((res) => res.json())
+      .then((payload) => setSkills(payload?.registry?.skills || []))
+      .catch(() => setSkills([]));
+  }, []);
 
-            const knowledge = Array.isArray(userInfo.knowledge) ? userInfo.knowledge : [];
-            if (knowledge.length > 0) {
-                html += `<div class="info-item"><div class="info-label">用户知识（最近${knowledge.length}条）</div><ul class="preferences-list">`;
-                knowledge.slice(0, 20).forEach(k => {
-                    const summary = (k.content || '').length > 120 ? k.content.slice(0, 120) + '...' : (k.content || '');
-                    html += `<li><strong>${k.category || '知识'}:</strong> ${summary}</li>`;
-                });
-                html += `</ul></div>`;
-            }
-            
-            content.innerHTML = html;
-            modal.classList.add('active');
-        }
-    } catch (error) {
-        alert('获取用户信息失败: ' + error.message);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(""), 3200);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  const handleLogin = async (userId) => {
+    const result = await apiCall("login", { user_id: userId || "guest" });
+    if (result.success) {
+      setUser({
+        userId: result.user_id,
+        sessionId: result.session_id,
+      });
+      setUserInfo(result.user_info || null);
+      resetMessages("");
     }
+  };
+
+  const handleNewSession = async () => {
+    if (!user) return;
+    const result = await apiCall("new_session", { user_id: user.userId });
+    if (result.success) {
+      setUser((prev) => ({ ...prev, sessionId: result.session_id }));
+      resetMessages("新会话已开始。");
+      setToast("新会话已创建");
+    }
+  };
+
+  const handleResetMemory = async () => {
+    if (!window.confirm("确定要重置长期记忆库吗？此操作不可恢复。")) return;
+    const result = await apiCall("reset_memory", { confirm: true });
+    if (result.success) {
+      setUserInfo(null);
+      resetMessages("长期记忆库已重置。");
+      setToast("记忆库已重置");
+    }
+  };
+
+  if (!user) return <LoginPanel onLogin={handleLogin} />;
+
+  return (
+    <div className="app-shell">
+      <Sidebar
+        user={user}
+        userInfo={userInfo}
+        activePanel={activePanel}
+        onPanelChange={setActivePanel}
+        onNewSession={handleNewSession}
+        onResetMemory={handleResetMemory}
+        onLogout={() => window.location.reload()}
+        skills={skills}
+      />
+      <main className="workspace">
+        <TopBar activePanel={activePanel} onPanelChange={setActivePanel} />
+        {activePanel === "Memory" ? (
+          <MemoryPanel userInfo={userInfo} onRefresh={refreshUserInfo} onReset={handleResetMemory} />
+        ) : activePanel === "Skills" ? (
+          <SkillPanel skills={skills} />
+        ) : (
+          <ChatWindow
+            user={user}
+            messages={messages}
+            isLoading={isLoading}
+            error={error}
+            onSend={sendQuestion}
+            onQuickStart={sendQuestion}
+          />
+        )}
+      </main>
+      {toast ? <div className="toast">{toast}</div> : null}
+    </div>
+  );
 }
 
-function handleCloseModal() {
-    document.getElementById('userInfoModal').classList.remove('active');
-}
+function LoginPanel({ onLogin }) {
+  const [userId, setUserId] = useState("guest");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-async function handleResetMemory() {
-    const confirmText = '确定要重置记忆库吗？此操作会清空所有用户的长期记忆和当前会话缓存，且不可恢复。';
-    if (!confirm(confirmText)) return;
-
+  const submit = async (event) => {
+    event.preventDefault();
+    setLoading(true);
+    setError("");
     try {
-        const result = await apiCall('reset_memory', {
-            user_id: AppState.userId,
-            confirm: true
+      await onLogin(userId.trim() || "guest");
+    } catch (err) {
+      setError(err.message || "登录失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="login-stage">
+      <section className="login-panel">
+        <div className="window-dots" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <p className="eyebrow">Flight Operations Agentic BI</p>
+        <h1>航空运营诊断工作台</h1>
+        <p className="login-copy">
+          用历史航班和天气数据做运营复盘、异常发现、天气影响归因与行业基准对比。
+        </p>
+        <form onSubmit={submit} className="login-form">
+          <label htmlFor="userId">用户 ID</label>
+          <div className="inline-input">
+            <input
+              id="userId"
+              value={userId}
+              onChange={(event) => setUserId(event.target.value)}
+              placeholder="guest"
+            />
+            <button type="submit" disabled={loading}>{loading ? "进入中" : "进入"}</button>
+          </div>
+          {error ? <div className="form-error">{error}</div> : null}
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function Sidebar({
+  user,
+  userInfo,
+  activePanel,
+  onPanelChange,
+  onNewSession,
+  onResetMemory,
+  onLogout,
+  skills,
+}) {
+  const preferenceCount = userInfo?.preferences ? Object.keys(userInfo.preferences).length : 0;
+  const knowledgeCount = Array.isArray(userInfo?.knowledge) ? userInfo.knowledge.length : 0;
+
+  return (
+    <aside className="sidebar">
+      <div className="window-dots" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </div>
+      <button className="nav-command" onClick={onNewSession}><span>+</span> 新会话</button>
+      <nav className="nav-list">
+        {navItems.map(([key, label]) => (
+          <button
+            key={key}
+            className={activePanel === key ? "active" : ""}
+            onClick={() => onPanelChange(key)}
+          >
+            <span className="nav-icon">{key.slice(0, 1)}</span>
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      <div className="sidebar-section">
+        <div className="section-title">Recents</div>
+        <div className="recent-item">
+          <strong>延误率异常诊断</strong>
+          <span>机场、航司、天气因素联合分析</span>
+        </div>
+        <div className="recent-item">
+          <strong>行业基准对比</strong>
+          <span>内部 SQL 证据与外部资料裁决</span>
+        </div>
+        <div className="recent-item">
+          <strong>运营周报摘要</strong>
+          <span>航班量、取消率、改降率复盘</span>
+        </div>
+      </div>
+
+      <div className="sidebar-section compact">
+        <div className="section-title">System</div>
+        <div className="metric-row"><span>Skills</span><strong>{skills.length}</strong></div>
+        <div className="metric-row"><span>Preferences</span><strong>{preferenceCount}</strong></div>
+        <div className="metric-row"><span>Knowledge</span><strong>{knowledgeCount}</strong></div>
+        <button className="quiet-action" onClick={onResetMemory}>重置记忆</button>
+      </div>
+
+      <div className="sidebar-user">
+        <div className="avatar">{(user.userId || "G").slice(0, 1).toUpperCase()}</div>
+        <div>
+          <strong>{user.userId}</strong>
+          <span>{user.sessionId ? `${user.sessionId.slice(0, 8)}...` : "-"}</span>
+        </div>
+        <button className="icon-button" onClick={onLogout} title="退出">↗</button>
+      </div>
+    </aside>
+  );
+}
+
+function TopBar({ activePanel, onPanelChange }) {
+  return (
+    <header className="topbar">
+      <div className="segmented" aria-label="workspace sections">
+        <button className={activePanel === "Workbench" ? "active" : ""} onClick={() => onPanelChange("Workbench")}>Workbench</button>
+        <button className={activePanel === "Trace" ? "active" : ""} onClick={() => onPanelChange("Trace")}>Trace</button>
+        <button className={activePanel === "Skills" ? "active" : ""} onClick={() => onPanelChange("Skills")}>Skills</button>
+      </div>
+    </header>
+  );
+}
+
+function ChatWindow({ user, messages, isLoading, error, onSend, onQuickStart }) {
+  const [draft, setDraft] = useState("");
+  const hasMessages = messages.length > 0;
+
+  const submit = () => {
+    if (!draft.trim()) return;
+    onSend(draft);
+    setDraft("");
+  };
+
+  return (
+    <section className={`chat-window ${hasMessages ? "conversation-mode" : ""}`}>
+      {!hasMessages ? (
+        <StartScreen user={user} draft={draft} setDraft={setDraft} submit={submit} onQuickStart={onQuickStart} isLoading={isLoading} />
+      ) : (
+        <>
+          <MessageList messages={messages} />
+          <Composer draft={draft} setDraft={setDraft} submit={submit} isLoading={isLoading} compact />
+        </>
+      )}
+      {error ? <div className="inline-error">{error}</div> : null}
+    </section>
+  );
+}
+
+function StartScreen({ user, draft, setDraft, submit, onQuickStart, isLoading }) {
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? "早上好" : hour < 18 ? "下午好" : "晚上好";
+
+  return (
+    <div className="start-screen">
+      <div className="mode-pill">Agentic BI · Operations</div>
+      <h1>{greeting}，{user.userId}</h1>
+      <p className="subtitle">面向航空运营团队的历史数据复盘、异常诊断和基准对比工作台。</p>
+      <Composer draft={draft} setDraft={setDraft} submit={submit} isLoading={isLoading} />
+      <div className="quick-label">Quick start</div>
+      <div className="quick-grid">
+        {quickStarts.map((item) => (
+          <button key={item.title} className="quick-card" onClick={() => onQuickStart(item.body)}>
+            <span className="quick-icon">{item.icon}</span>
+            <span>
+              <strong>{item.title}</strong>
+              <small>{item.body}</small>
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Composer({ draft, setDraft, submit, isLoading, compact = false }) {
+  const textRef = useRef(null);
+
+  useEffect(() => {
+    const el = textRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [draft]);
+
+  return (
+    <div className={`composer ${compact ? "compact" : ""}`}>
+      <textarea
+        ref={textRef}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            submit();
+          }
+        }}
+        placeholder="问一个运营问题，例如：最近90天哪些机场延误率异常？"
+        rows={1}
+      />
+      <div className="composer-actions">
+        <button className="tool-button" title="SQL evidence">SQL</button>
+        <button className="tool-button" title="Benchmark search">WEB</button>
+        <button className="send-button" onClick={submit} disabled={isLoading || !draft.trim()} title="发送">↑</button>
+      </div>
+    </div>
+  );
+}
+
+function MessageList({ messages }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: "smooth" });
+    if (window.hljs) {
+      setTimeout(() => {
+        ref.current?.querySelectorAll("pre code").forEach((block) => {
+          try { window.hljs.highlightElement(block); } catch {}
         });
-
-        if (result.success) {
-            AppState.userInfo = null;
-            AppState.messageHistory = [];
-            addSystemMessage('长期记忆库已重置，历史偏好与知识已清空。');
-            alert('记忆库重置完成。');
-        }
-    } catch (error) {
-        alert('重置记忆库失败: ' + error.message);
+      }, 0);
     }
+  }, [messages]);
+
+  return (
+    <div className="message-list" ref={ref}>
+      {messages.map((message) => (
+        <MessageBubble key={message.id} message={message} />
+      ))}
+    </div>
+  );
 }
 
-// ===== 快捷问题 =====
-function handleQuickQuestion(question) {
-    const input = document.getElementById('questionInput');
-    input.value = question;
-    input.focus();
+function MessageBubble({ message }) {
+  const isUser = message.role === "user";
+  return (
+    <article className={`message ${isUser ? "user" : "assistant"}`}>
+      <div className="message-meta">{isUser ? "You" : "Operations Agent"}</div>
+      <div className="message-body">
+        {message.status ? <div className="status-line"><span className="pulse"></span>{message.status}</div> : null}
+        {message.error ? <div className="message-error">{message.error}</div> : null}
+        {message.text ? <MarkdownBlock text={message.text} /> : null}
+        {!isUser ? (
+          <div className="artifact-stack">
+            <AgentTraceTimeline traces={message.traces} plan={message.plan} intent={message.intent} quality={message.quality} />
+            <SQLPanel sql={message.sql} retryCount={message.retryCount} />
+            <ChartPanel chart={message.chart} />
+            <SourceList sources={message.sources} />
+          </div>
+        ) : null}
+      </div>
+    </article>
+  );
 }
 
-// ===== 事件监听器 =====
-document.addEventListener('DOMContentLoaded', () => {
-    const userIdInput = document.getElementById('userIdInput');
-    const loginBtn = document.getElementById('loginBtn');
-    
-    userIdInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') handleLogin(); });
-    loginBtn.addEventListener('click', handleLogin);
-    
-    document.getElementById('sendBtn').addEventListener('click', handleSend);
-    document.getElementById('newSessionBtn').addEventListener('click', handleNewSession);
-    document.getElementById('userInfoBtn').addEventListener('click', handleShowUserInfo);
-    document.getElementById('resetMemoryBtn').addEventListener('click', handleResetMemory);
-    document.getElementById('logoutBtn').addEventListener('click', handleLogout);
-    document.getElementById('closeModalBtn').addEventListener('click', handleCloseModal);
-    
-    const questionInput = document.getElementById('questionInput');
-    questionInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            handleSend();
-        }
-    });
-    questionInput.addEventListener('input', () => {
-        questionInput.style.height = 'auto';
-        questionInput.style.height = questionInput.scrollHeight + 'px';
-    });
-    
-    document.querySelectorAll('.question-item').forEach(btn => {
-        btn.addEventListener('click', () => handleQuickQuestion(btn.getAttribute('data-question')));
-    });
-    
-    const modal = document.getElementById('userInfoModal');
-    modal.addEventListener('click', (e) => { if (e.target === modal) handleCloseModal(); });
-    
-    userIdInput.focus();
-    
-    // 窗口大小变化时调整图表
-    window.addEventListener('resize', () => {
-        Object.values(AppState.chartInstances).forEach(chart => {
-            try { chart.resize(); } catch (e) {}
-        });
-    });
-});
-
-// ===== 工具函数 =====
-function formatTimestamp(date) {
-    return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+function MarkdownBlock({ text }) {
+  return (
+    <div
+      className="markdown-body answer-body"
+      dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }}
+    />
+  );
 }
 
-// ===== 导出API供控制台调试 =====
-window.AppDebug = {
-    state: AppState,
-    apiCall,
-    handleQuery,
-    handleNewSession
-};
+function AgentTraceTimeline({ traces = [], plan, intent, quality }) {
+  if (!traces?.length && !plan && !intent && !quality) return null;
+  const score = quality?.debate?.scorecard || {};
+  const confidence = quality?.confidence_label;
 
-console.log('🚀 多智能体数据查询系统前端 v3.1 已加载');
-console.log('✨ 新特性: SSE流式响应 | DeepSearch联网搜索 | ECharts可视化 | SQL自动纠错');
-console.log('💡 提示：可以通过 window.AppDebug 访问调试API');
+  return (
+    <details className="artifact-panel">
+      <summary>Agent trace</summary>
+      <div className="trace-content">
+        {intent ? <div className="trace-chip">Intent: {intent}</div> : null}
+        {confidence ? <div className="trace-chip">Confidence: {confidence}</div> : null}
+        {score.total !== undefined ? <div className="trace-chip">Score: {score.total}/{score.threshold}</div> : null}
+        {plan ? (
+          <div className="plan-box">
+            <strong>{plan.goal || "任务计划"}</strong>
+            <ol>
+              {(plan.steps || []).map((step, index) => (
+                <li key={index}>{step.agent || "agent"} · {step.task || ""}</li>
+              ))}
+            </ol>
+          </div>
+        ) : null}
+        <div className="timeline">
+          {traces.map((trace, index) => (
+            <div className="timeline-row" key={`${trace.step}_${index}`}>
+              <span></span>
+              <div><strong>{trace.step}</strong><small>{trace.detail}</small></div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function SQLPanel({ sql, retryCount }) {
+  if (!sql) return null;
+  return (
+    <details className="artifact-panel">
+      <summary>SQL evidence {retryCount ? `· repaired ${retryCount}x` : ""}</summary>
+      <pre><code className="language-sql">{sql}</code></pre>
+    </details>
+  );
+}
+
+function ChartPanel({ chart }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!chart || !ref.current || !window.echarts) return;
+    const instance = window.echarts.init(ref.current, null, { renderer: "canvas" });
+    instance.setOption({
+      backgroundColor: "transparent",
+      grid: { left: "4%", right: "4%", bottom: "10%", containLabel: true },
+      tooltip: { trigger: "axis" },
+      ...chart,
+    });
+    const resize = () => instance.resize();
+    window.addEventListener("resize", resize);
+    return () => {
+      window.removeEventListener("resize", resize);
+      instance.dispose();
+    };
+  }, [chart]);
+
+  if (!chart) return null;
+  return <div className="chart-panel" ref={ref}></div>;
+}
+
+function SourceList({ sources = [] }) {
+  const valid = (sources || []).filter(Boolean).slice(0, 5);
+  if (!valid.length) return null;
+  return (
+    <div className="source-list">
+      <div className="source-title">Sources</div>
+      {valid.map((url, index) => {
+        let label = url;
+        try { label = new URL(url).hostname; } catch {}
+        return <a key={url + index} href={url} target="_blank" rel="noreferrer">{index + 1}. {label}</a>;
+      })}
+    </div>
+  );
+}
+
+function MemoryPanel({ userInfo, onRefresh, onReset }) {
+  const preferences = userInfo?.preferences || {};
+  const knowledge = Array.isArray(userInfo?.knowledge) ? userInfo.knowledge : [];
+
+  return (
+    <section className="panel-page">
+      <div className="panel-header">
+        <div>
+          <p className="eyebrow">Memory</p>
+          <h1>长期记忆</h1>
+          <p>展示用户偏好和知识沉淀，便于说明 Agent 的上下文管理能力。</p>
+        </div>
+        <div className="panel-actions">
+          <button onClick={onRefresh}>刷新</button>
+          <button className="danger" onClick={onReset}>重置</button>
+        </div>
+      </div>
+      <div className="memory-grid">
+        <div className="data-panel">
+          <h2>用户画像</h2>
+          <div className="metric-row"><span>用户 ID</span><strong>{userInfo?.user_id || "-"}</strong></div>
+          <div className="metric-row"><span>会话 ID</span><strong>{userInfo?.session_id?.slice(0, 8) || "-"}</strong></div>
+          <div className="metric-row"><span>偏好数量</span><strong>{Object.keys(preferences).length}</strong></div>
+          <div className="metric-row"><span>知识数量</span><strong>{knowledge.length}</strong></div>
+        </div>
+        <div className="data-panel">
+          <h2>偏好</h2>
+          {Object.keys(preferences).length ? Object.entries(preferences).map(([key, value]) => (
+            <div className="list-line" key={key}><strong>{key}</strong><span>{value}</span></div>
+          )) : <p className="empty-text">暂无偏好记录。</p>}
+        </div>
+        <div className="data-panel wide">
+          <h2>知识</h2>
+          {knowledge.length ? knowledge.slice(0, 12).map((item, index) => (
+            <div className="knowledge-item" key={index}>
+              <strong>{item.category || "知识"}</strong>
+              <p>{item.content || ""}</p>
+            </div>
+          )) : <p className="empty-text">暂无知识记录。</p>}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SkillPanel({ skills }) {
+  return (
+    <section className="panel-page">
+      <div className="panel-header">
+        <div>
+          <p className="eyebrow">Registry</p>
+          <h1>Skill Registry</h1>
+          <p>用轻量声明式配置展示工具边界、输入输出和权限要求。</p>
+        </div>
+      </div>
+      <div className="skill-grid">
+        {skills.map((skill) => (
+          <article className="skill-card" key={skill.name}>
+            <div className="skill-top">
+              <span>{skill.type}</span>
+              <strong>{skill.name}</strong>
+            </div>
+            <p>{skill.description}</p>
+            <div className="permission-list">
+              {(skill.permissions || []).map((permission) => <code key={permission}>{permission}</code>)}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);

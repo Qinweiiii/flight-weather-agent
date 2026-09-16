@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from agent import MultiAgentSystem
 from data.init_memory_db import init_memory_database
+from tools.skill_registry import load_skill_registry
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 CORS(app)  # 允许跨域请求，避免浏览器跨域阻断
@@ -287,14 +288,31 @@ def health():
     })
 
 
+@app.route('/api/skills', methods=['GET'])
+def skills():
+    """返回声明式 Skill Registry，便于前端或面试演示查看系统能力边界。"""
+    try:
+        registry = load_skill_registry(Path(__file__).parent / "config" / "skill_registry.yaml")
+        return jsonify({
+            'success': True,
+            'registry': registry.summary()
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 if __name__ == '__main__':
     # 检查环境变量
     if not os.getenv("DASHSCOPE_API_KEY"):
         print("错误：未设置 DASHSCOPE_API_KEY 环境变量")
         sys.exit(1)
     
-    print("🚀 多智能体数据查询系统 Web API 启动中...")
-    print("📡 访问地址: http://localhost:5000")
-    
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.getenv("PORT", "5000"))
 
+    print("🚀 多智能体数据查询系统 Web API 启动中...")
+    print(f"📡 访问地址: http://localhost:{port}")
+    
+    app.run(host='0.0.0.0', port=port, debug=True)

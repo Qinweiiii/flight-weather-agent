@@ -1,4 +1,4 @@
-# 项目代码阅读清单（航班-天气多智能体）
+# 项目代码阅读清单（航空运营诊断 Agentic BI）
 
 这份清单用于按最省心的顺序阅读代码，目标是先跑通主链路，再理解每个模块的职责与边界。
 
@@ -15,7 +15,7 @@
 - [ ] 查看 config/config.yaml
 - [ ] 查看 app.py
 - [ ] 查看 agent.py
-- [ ] 查看 start_web.bat
+- [ ] 查看 start_web.sh / start_web.bat
 
 看完要确认：
 
@@ -153,12 +153,16 @@
 
 - [ ] 查看 data/init_flight_weather_db.py
 - [ ] 查看 mcp_sql_server.py
+- [ ] 查看 config/skill_registry.yaml
+- [ ] 查看 tools/skill_registry.py
+- [ ] 查看 tools/operational_skills.py
 
 看完要确认：
 
 1. CSV 到 SQLite 的建表、索引、视图流程。
 2. 默认数据库路径与回退策略。
 3. MCP SQL 服务如何被主系统调用。
+4. Skill Registry 如何声明 SQLTool、SearchTool、ChartTool、AnomalySkill、WeatherImpactSkill、ReportSkill。
 
 ---
 
@@ -178,12 +182,14 @@
 
 ## 阶段 9：评测与回归
 
-- [ ] 查看 eval/minimal_dev_test_eval.py
+- [ ] 查看 eval/nl2sql_golden_eval.py
+- [ ] 查看 docs/agent-evaluation-report.md
 
 看完要确认：
 
-1. 当前评测题是否覆盖 SQL、分析、联合对比三类场景。
-2. 评测 SQL 与真实字段是否一致。
+1. NL2SQL golden set 如何计算 Execution Accuracy。
+2. Guardrail、SQL Reflection、Search + SQL + Debate 分别如何记录案例。
+3. 延迟、失败阶段和 trace 如何用于定位问题。
 
 ---
 

@@ -1,0 +1,87 @@
+version: 1
+description: "Lightweight skill registry for the flight operations Agentic BI assistant."
+skills:
+  - name: SQLTool
+    type: tool
+    description: "Run read-only SQL against the internal flight-weather SQLite database."
+    entrypoint: "tools.operational_skills.SQLTool"
+    permissions:
+      - database:read
+    input_schema:
+      question: "Optional natural-language question when used through SQLQueryAgent."
+      sql: "Optional read-only SELECT/WITH SQL for deterministic execution."
+      max_retries: "Maximum SQL reflection retries when question mode is used."
+    output_schema:
+      sql: "Executed SQL."
+      data: "JSON rows or message."
+      error: "Error message when execution fails."
+      retry_count: "Reflection retry count."
+      failure_stage: "Generation, safety, execution, or exception stage."
+
+  - name: SearchTool
+    type: tool
+    description: "Search external aviation sources for industry benchmarks and public context."
+    entrypoint: "tools.operational_skills.SearchTool"
+    permissions:
+      - network:search
+    input_schema:
+      question: "Industry benchmark or external evidence question."
+    output_schema:
+      answer: "Synthesized external evidence."
+      sources: "Source URLs."
+      quality: "Evidence quality metadata."
+      error: "Error message when search is unavailable or fails."
+
+  - name: ChartTool
+    type: tool
+    description: "Generate a lightweight ECharts option from tabular data."
+    entrypoint: "tools.operational_skills.ChartTool"
+    permissions:
+      - local:compute
+    input_schema:
+      data: "List of dict rows or JSON string."
+      title: "Optional chart title."
+    output_schema:
+      chart: "ECharts option."
+      error: "Error message when chart generation fails."
+
+  - name: AnomalySkill
+    type: skill
+    description: "Scan recent operating metrics for dimension-level anomalies versus the previous period."
+    entrypoint: "tools.operational_skills.AnomalySkill"
+    permissions:
+      - database:read
+    input_schema:
+      metric: "arr_delay_rate, cancel_rate, or avg_arr_delay."
+      dimension: "ORIGIN, DEST, or OP_UNIQUE_CARRIER."
+      period_days: "Recent period length."
+      min_flights: "Minimum flights per bucket."
+      limit: "Maximum anomaly rows."
+    output_schema:
+      anomalies: "Ranked anomaly rows with recent, previous, and delta values."
+      data_period: "Database min/max observation dates."
+
+  - name: WeatherImpactSkill
+    type: skill
+    description: "Compare delay and cancellation outcomes under high/low weather exposure buckets."
+    entrypoint: "tools.operational_skills.WeatherImpactSkill"
+    permissions:
+      - database:read
+    input_schema:
+      precipitation_threshold: "Rain threshold in mm."
+      period_days: "Lookback window using max FL_DATE as anchor."
+    output_schema:
+      buckets: "Weather exposure comparison rows."
+      interpretation: "Deterministic summary of observed impact."
+
+  - name: ReportSkill
+    type: skill
+    description: "Generate a deterministic daily or weekly operations summary from internal data."
+    entrypoint: "tools.operational_skills.ReportSkill"
+    permissions:
+      - database:read
+    input_schema:
+      period: "daily or weekly."
+    output_schema:
+      report: "Markdown operations summary."
+      metrics: "Structured KPI rows used by the report."

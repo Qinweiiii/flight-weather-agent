@@ -1,4 +1,4 @@
-# 面试准备手册（腾讯后端/Agent方向）
+# 面试准备手册（字节 AI Agent / 全栈方向）
 
 > 目标：把高频问题讲成“有结构、有取舍、有数据”的答案，而不是背概念。
 
@@ -14,10 +14,10 @@
 
 ## 1）自我介绍 & 项目深挖
 
-### Q1. 3分钟讲清你的航班-天气数据分析 Agent：架构、你的贡献、难点、数据效果。
+### Q1. 3分钟讲清你的航空运营诊断 Agentic BI：架构、你的贡献、难点、数据效果。
 
 **A：**
-我做的是一个面向航班运营分析的多智能体系统，目标是把“自然语言问题”稳定转成“可执行查询 + 可解释结论”。
+我做的是一个面向航空公司/机场运营团队的 Agentic BI 与运营诊断系统，目标是把“自然语言问题”稳定转成“可执行查询 + 可解释结论 + 可追踪证据”。它不是乘客实时查票助手，而是面向历史运营复盘、异常诊断、天气影响归因和行业基准对比。
 
 - 架构：采用 LangGraph 工作流编排。主控 MasterAgent 负责 Guardrail、安全检查、任务规划、意图识别与路由；执行层有 SQLAgent、SearchAgent、AnalysisAgent；治理层有 Critic 与 Debate；记忆层有短期会话记忆和长期记忆。
 - 我的核心贡献：
@@ -26,6 +26,7 @@
   - 做了证据分层与裁决（strong/proxy/none + scorecard + low-evidence 降级）。
   - 做了长期记忆的向量召回改造（向量主路径 + 关键词兜底）。
   - 做了 SSE 可观测输出（plan/trace/sql/sources/quality/chunk）。
+  - 新增轻量 Skill Registry，把 SQLTool、SearchTool、ChartTool、AnomalySkill、WeatherImpactSkill、ReportSkill 的输入输出和权限边界声明出来。
 - 主要难点：
   - LLM 输出不稳定导致格式错误、SQL 执行失败。
   - 外部证据不足时容易“硬对标”。

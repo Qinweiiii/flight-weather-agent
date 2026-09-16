@@ -5,6 +5,16 @@ echo " 多智能体数据查询系统 - Web界面启动"
 echo "====================================="
 echo
 
+# Resolve Python interpreter. Prefer the project virtualenv, then python3.
+if [ -x ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+else
+    echo "[错误] 未找到 Python。请先安装 Python 3。"
+    exit 1
+fi
+
 # 检查环境变量
 if [ -z "$DASHSCOPE_API_KEY" ]; then
     echo "[错误] 未设置 DASHSCOPE_API_KEY 环境变量"
@@ -21,18 +31,14 @@ echo
 # 检查数据库是否存在
 if [ ! -f "data/flight_weather.db" ]; then
     echo "[警告] 业务数据库不存在，正在初始化..."
-    cd data
-    python init_db.py
-    cd ..
+    "$PYTHON" data/init_flight_weather_db.py
     echo "业务数据库初始化完成"
     echo
 fi
 
 if [ ! -f "data/long_term_memory.db" ]; then
     echo "[警告] 记忆数据库不存在，正在初始化..."
-    cd data
-    python init_memory_db.py
-    cd ..
+    "$PYTHON" data/init_memory_db.py
     echo "记忆数据库初始化完成"
     echo
 fi
@@ -42,11 +48,11 @@ echo
 
 echo "正在启动Web服务器..."
 echo
-echo "访问地址: http://localhost:5000"
+PORT="${PORT:-5000}"
+echo "访问地址: http://localhost:$PORT"
 echo
 echo "按 Ctrl+C 停止服务器"
 echo "====================================="
 echo
 
-python app.py
-
+"$PYTHON" app.py
