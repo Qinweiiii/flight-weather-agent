@@ -1,318 +1,216 @@
-"""
-Flask Web API for Multi-Agent Data Query System
-提供RESTful API接口供前端调用，支持普通查询和流式SSE查询。
-"""
-
-from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
-from flask_cors import CORS
-import os
-import sys
+"""Local operations workbench API. Demo identity is not production authentication."""
 import json
-from typing import Dict, Any
+import os
 from pathlib import Path
-
-# 将当前目录添加到Python路径
-sys.path.insert(0, os.path.dirname(__file__))
-
+import re
+import secrets
+import threading
+import queue
+from flask import Flask, request, jsonify, send_from_directory, Response, session
 from agent import MultiAgentSystem
-from data.init_memory_db import init_memory_database
 from tools.skill_registry import load_skill_registry
+from tools.metrics import provenance
+from tools.sql_executor import read_rows
 
-app = Flask(__name__, static_folder='static', static_url_path='')
-CORS(app)  # 允许跨域请求，避免浏览器跨域阻断
+ROOT = Path(__file__).resolve().parent
+app = Flask(__name__, static_folder=str(ROOT/'static'), static_url_path='')
+app.config.update(SECRET_KEY=os.getenv('FLASK_SECRET_KEY') or secrets.token_hex(32),
+                  SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict', MAX_CONTENT_LENGTH=32768)
+user_systems = {}
+system_locks = {}
+creation_lock = threading.Lock()
 
-# 全局系统实例（用于存储不同用户的会话）
-user_systems: Dict[str, MultiAgentSystem] = {}
-# 让每一个用户有自己的会话上下文，而不是所有人共用一个 Agent 状态
+
+def get_or_create_system(user_id):
+    with creation_lock:
+        if user_id not in user_systems:
+            if len(user_systems) >= 32:
+                raise ValueError('本地会话数已达上限，请重启服务。')
+            system = MultiAgentSystem()
+            if not system.login(user_id):
+                raise ValueError('无法初始化用户记忆')
+            user_systems[user_id] = system
+            system_locks[user_id] = threading.Lock()
+        return user_systems[user_id]
 
 
-def get_or_create_system(user_id: str) -> MultiAgentSystem:
-    """获取或创建用户的系统实例"""
-    if user_id not in user_systems:
-        system = MultiAgentSystem()
-        system.login(user_id)
-        user_systems[user_id] = system
-    return user_systems[user_id]
+def payload():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise ValueError('请求必须是 JSON 对象')
+    return data
+
+
+def current_system():
+    user = session.get('user_id')
+    if not user:
+        return None
+    return get_or_create_system(user)
+
+
+@app.before_request
+def check_session():
+    if request.path.startswith('/api/') and request.path not in ('/api/health', '/api/skills', '/api/login', '/api/dataset'):
+        if not session.get('user_id'):
+            return jsonify(success=False, error='请先进入工作台'), 401
+        data = request.get_json(silent=True)
+        if isinstance(data, dict) and data.get('user_id', session['user_id']) != session['user_id']:
+            return jsonify(success=False, error='会话用户不匹配'), 403
+
+
+@app.errorhandler(ValueError)
+def bad_request(exc):
+    return jsonify(success=False, error=str(exc)), 400
 
 
 @app.route('/')
 def index():
-    """返回前端页面"""
-    return send_from_directory('static', 'index.html')
+    return send_from_directory(app.static_folder, 'index.html')
 
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    """用户登录接口"""
-    try:
-        data = request.json
-        user_id = data.get('user_id', 'guest')
-        
-        # 创建或获取用户系统
-        system = get_or_create_system(user_id)
-
-        # 直接从长期记忆数据库加载用户信息（无需等待对话总结）
-        ltm = system.master_agent.long_term_memory
-        profile = ltm.get_user_profile(user_id)
-        preferences = ltm.get_all_preferences(user_id)
-        knowledge = ltm.get_all_knowledge(user_id, limit=50)
-
-        return jsonify({
-            'success': True,
-            'user_id': user_id,
-            'session_id': system.session_id,
-            'message': f'欢迎 {user_id}！',
-            'user_info': {
-                'logged_in': True,
-                'user_id': user_id,
-                'session_id': system.session_id,
-                'profile': profile,
-                'preferences': preferences,
-                'knowledge': knowledge
-            }
-        })
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
-@app.route('/api/query', methods=['POST'])
-def query():
-    """查询接口"""
-    try:
-        data = request.json
-        user_id = data.get('user_id', 'guest')
-        question = data.get('question', '')
-        
-        if not question.strip():
-            return jsonify({
-                'success': False,
-                'error': '问题不能为空'
-            }), 400
-        
-        # 获取用户系统
-        system = get_or_create_system(user_id)
-        
-        # 执行查询
-        answer = system.query(question)
-        
-        return jsonify({
-            'success': True,
-            'answer': answer,
-            'user_id': user_id,
-            'session_id': system.session_id
-        })
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
-@app.route('/api/new_session', methods=['POST'])
-def new_session():
-    """创建新会话"""
-    try:
-        data = request.json
-        user_id = data.get('user_id', 'guest')
-        
-        system = get_or_create_system(user_id)
-        system.new_session()
-        
-        return jsonify({
-            'success': True,
-            'session_id': system.session_id,
-            'message': '已开始新会话'
-        })
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+    user = payload().get('user_id', 'guest')
+    if not isinstance(user, str) or not re.fullmatch(r'[\w\-]{1,64}', user):
+        raise ValueError('用户标识使用 1–64 个字母、数字、汉字、下划线或连字符')
+    system = get_or_create_system(user)
+    session['user_id'] = user
+    info = system.get_user_info()
+    info['knowledge'] = system.master_agent.long_term_memory.get_all_knowledge(user, limit=50)
+    return jsonify(success=True, user_id=user, session_id=system.session_id, user_info=info,
+                   mode='demo' if system.demo else 'live')
 
 
 @app.route('/api/user_info', methods=['POST'])
 def user_info():
-    """获取用户信息"""
-    try:
-        data = request.json
-        user_id = data.get('user_id', 'guest')
-        
-        system = get_or_create_system(user_id)
-        # 直接读取长期记忆，包括知识列表
-        ltm = system.master_agent.long_term_memory
-        info = system.get_user_info()
-        info['knowledge'] = ltm.get_all_knowledge(user_id, limit=50)
+    system = current_system()
+    info = system.get_user_info()
+    info['knowledge'] = system.master_agent.long_term_memory.get_all_knowledge(system.user_id, limit=50)
+    return jsonify(success=True, user_info=info)
 
-        return jsonify({
-            'success': True,
-            'user_info': info
-        })
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+
+@app.route('/api/new_session', methods=['POST'])
+def new_session():
+    system = current_system()
+    lock = system_locks[system.user_id]
+    if not lock.acquire(blocking=False):
+        return jsonify(success=False, error='当前分析尚未结束'), 409
+    try:
+        system.new_session()
+        return jsonify(success=True, session_id=system.session_id)
+    finally:
+        lock.release()
 
 
 @app.route('/api/reset_memory', methods=['POST'])
 def reset_memory():
-    """重置长期记忆库（清空所有用户偏好与知识）"""
+    if payload().get('confirm') is not True:
+        raise ValueError('需要 confirm=true')
+    system = current_system()
+    lock = system_locks[system.user_id]
+    if not lock.acquire(blocking=False):
+        return jsonify(success=False, error='当前分析尚未结束'), 409
     try:
-        data = request.json or {}
-        if not data.get('confirm', False):
-            return jsonify({
-                'success': False,
-                'error': '请确认重置操作（confirm=true）'
-            }), 400
+        system.master_agent.long_term_memory.clear_user_memory(system.user_id)
+        system.new_session()
+        return jsonify(success=True, message='已清除当前用户记忆', session_id=system.session_id)
+    finally:
+        lock.release()
 
-        # 优先使用现有系统实例中的配置路径，避免与配置文件不一致
-        memory_db_path = './data/long_term_memory.db'
-        if user_systems:
-            sample_system = next(iter(user_systems.values()))
-            memory_db_path = sample_system.master_agent.long_term_memory.db_path
 
-        db_file = Path(memory_db_path)
+def query_input():
+    q = payload().get('question', '')
+    if not isinstance(q, str) or not q.strip() or len(q) > 8000:
+        raise ValueError('问题长度需为 1–8000 字符')
+    system = current_system()
+    lock = system_locks[system.user_id]
+    return q.strip(), system, lock
 
-        # 清理内存中的系统实例，避免持有旧连接
-        user_systems.clear()
 
-        if db_file.exists():
-            db_file.unlink()
-
-        init_memory_database(str(db_file))
-
-        return jsonify({
-            'success': True,
-            'message': '记忆库已重置',
-            'memory_db': str(db_file)
-        })
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+@app.route('/api/query', methods=['POST'])
+def query():
+    q, system, lock = query_input()
+    if not lock.acquire(blocking=False):
+        return jsonify(success=False, error='同一用户正在分析，请等待完成'), 409
+    try:
+        final = None
+        for frame in system.stream_query(q):
+            event = json.loads(frame[6:])
+            if event['type'] == 'done':
+                final = event
+        return jsonify(success=not bool(final.get('failure_stage')), answer=final['answer'],
+                       request_id=final['request_id'], failure_stage=final.get('failure_stage'), session_id=system.session_id)
+    finally:
+        lock.release()
 
 
 @app.route('/api/query_stream', methods=['POST'])
 def query_stream():
-    """流式查询接口（Server-Sent Events）
-    
-    前端使用 fetch + ReadableStream 接收，实现逐字打字效果。
-    事件类型：
-      - status: 处理状态更新（如"正在查询数据库..."）
-            - plan: Planner Agent 生成的任务计划
-            - trace: Agent 执行轨迹事件
-      - intent: 识别到的意图类型
-      - sql: 生成的SQL语句（含重试次数）
-      - sources: 联网搜索来源URL列表
-      - chart: ECharts图表配置JSON
-      - chunk: LLM输出的文字片段（流式）
-      - error: 错误信息（非致命，继续处理）
-      - done: 流结束标志（含完整answer）
-    """
-    try:
-        data = request.json
-        user_id = data.get('user_id', 'guest')
-        question = data.get('question', '')
-        
-        if not question.strip():
-            return jsonify({'success': False, 'error': '问题不能为空'}), 400
-        
-        system = get_or_create_system(user_id)
-        
-        def generate():
+    q, system, lock = query_input()
+    if not lock.acquire(blocking=False):
+        return jsonify(success=False, error='同一用户正在分析，请等待完成'), 409
+    mailbox = queue.Queue(maxsize=64)
+    cancelled = threading.Event()
+    def put(item):
+        while not cancelled.is_set():
             try:
-                for event in system.stream_query(question):
-                    yield event
-            except Exception as e:
-                yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'done', 'answer': f'系统错误: {str(e)}'})}\n\n"
-        
-        return Response(
-            stream_with_context(generate()),
-            mimetype='text/event-stream',
-            headers={
-                'Cache-Control': 'no-cache',
-                'X-Accel-Buffering': 'no',
-                'Connection': 'keep-alive'
-            }
-        )
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+                mailbox.put(item, timeout=1)
+                return
+            except queue.Full:
+                continue
+    def work():
+        try:
+            for frame in system.stream_query(q):
+                if cancelled.is_set():
+                    break
+                put(frame)
+        finally:
+            lock.release()
+            put(None)
+    threading.Thread(target=work, daemon=True, name='flight-query').start()
+    def generate():
+        try:
+            while True:
+                try:
+                    frame = mailbox.get(timeout=10)
+                except queue.Empty:
+                    yield ': keepalive\n\n'
+                    continue
+                if frame is None:
+                    break
+                yield frame
+        finally:
+            cancelled.set()
+    response = Response(generate(), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+    response.call_on_close(cancelled.set)
+    return response
 
 
-@app.route('/api/health', methods=['GET'])
-def health():
-    """健康检查接口"""
-    search_available = False
-    agent_features = {
-        'planner_agent': False,
-        'tool_router_agent': False,
-        'critic_agent': False,
-        'guardrail_agent': False,
-        'memory_agent': False,
-        'debate_agent': False
-    }
-    try:
-        if user_systems:
-            first_system = next(iter(user_systems.values()))
-            master = first_system.master_agent
-            search_available = master.search_agent.available
-            agent_features = {
-                'planner_agent': hasattr(master, 'planner_agent'),
-                'tool_router_agent': hasattr(master, 'tool_router_agent'),
-                'critic_agent': hasattr(master, 'critic_agent'),
-                'guardrail_agent': hasattr(master, 'guardrail_agent'),
-                'memory_agent': hasattr(master, 'memory_agent'),
-                'debate_agent': hasattr(master, 'debate_agent')
-            }
-    except Exception:
-        pass
-    
-    return jsonify({
-        'status': 'healthy',
-        'active_users': len(user_systems),
-        'features': {
-            'sql_self_correction': True,
-            'sql_readonly_guard': True,
-            'execution_latency_trace': True,
-            'streaming': True,
-            'web_search': search_available,
-            'data_visualization': True,
-            **agent_features
-        },
-        'agent_version': 'v3.1-agentic'
-    })
-
-
-@app.route('/api/skills', methods=['GET'])
+@app.route('/api/skills')
 def skills():
-    """返回声明式 Skill Registry，便于前端或面试演示查看系统能力边界。"""
-    try:
-        registry = load_skill_registry(Path(__file__).parent / "config" / "skill_registry.yaml")
-        return jsonify({
-            'success': True,
-            'registry': registry.summary()
-        })
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+    return jsonify(success=True, registry=load_skill_registry(ROOT/'config/skill_registry.yaml').summary())
+
+
+@app.route('/api/dataset')
+def dataset():
+    import yaml
+    config = yaml.safe_load((ROOT/'config/config.yaml').read_text(encoding='utf-8'))
+    mode = os.getenv('APP_MODE', 'live')
+    path = ROOT/os.getenv('FLIGHT_DB_PATH', 'data/demo_operations.db' if mode=='demo' else config['database']['path'])
+    if not path.is_file():
+        return jsonify(success=False, error='数据库未初始化', mode=mode), 503
+    stats = read_rows(path, 'SELECT COUNT(*) AS flight_cnt, MIN(FL_DATE) AS min_date, MAX(FL_DATE) AS max_date FROM flights_enriched')[0]
+    return jsonify(success=True, mode=mode, dataset={**stats, **provenance(path)})
+
+
+@app.route('/api/health')
+def health():
+    return jsonify(status='ok', mode=os.getenv('APP_MODE', 'live'),
+                   llm_configured=bool(os.getenv('DASHSCOPE_API_KEY')),
+                   search_configured=bool(os.getenv('TAVILY_API_KEY')),
+                   note='进程存活检查；未验证模型权限或外部网络', agent_version='4.0-controlled-workflow')
 
 
 if __name__ == '__main__':
-    # 检查环境变量
-    if not os.getenv("DASHSCOPE_API_KEY"):
-        print("错误：未设置 DASHSCOPE_API_KEY 环境变量")
-        sys.exit(1)
-    
-    port = int(os.getenv("PORT", "5000"))
-
-    print("🚀 多智能体数据查询系统 Web API 启动中...")
-    print(f"📡 访问地址: http://localhost:{port}")
-    
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host=os.getenv('HOST', '127.0.0.1'), port=int(os.getenv('PORT', '5001')), debug=False, threaded=True)

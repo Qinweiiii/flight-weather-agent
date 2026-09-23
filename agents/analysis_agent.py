@@ -175,11 +175,10 @@ class DataAnalysisAgent:
             
             # ECharts 图表配置（仅对适合可视化的数据生成）
             if self._should_generate_chart(parsed_data):
-                chart_config = self._generate_chart_config(parsed_data, data_summary, context)
-                result["chart"] = chart_config
+                from tools.operational_skills import ChartTool
+                result["chart"] = ChartTool().generate(parsed_data)["chart"]
             
         except Exception as e:
             result["error"] = f"分析失败: {str(e)}"
         
         return result
-

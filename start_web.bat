@@ -1,55 +1,23 @@
 @echo off
-chcp 65001
-echo =====================================
-echo  多智能体数据查询系统 - Web界面启动
-echo =====================================
-echo.
-
-REM 检查环境变量
-if "%DASHSCOPE_API_KEY%"=="" (
-    echo [错误] 未设置 DASHSCOPE_API_KEY 环境变量
-    echo.
-    echo 请先设置环境变量：
-    echo set DASHSCOPE_API_KEY=your_api_key
-    echo.
-    pause
-    exit /b 1
+setlocal
+cd /d "%~dp0"
+set "PYTHON=python"
+if exist ".venv\Scripts\python.exe" set "PYTHON=.venv\Scripts\python.exe"
+if not defined APP_MODE set "APP_MODE=live"
+if not defined PORT set "PORT=5001"
+if "%APP_MODE%"=="demo" goto demo
+if not defined QWEN_API_KEY if not defined DASHSCOPE_API_KEY (
+  echo Set QWEN_API_KEY or use APP_MODE=demo. DASHSCOPE_API_KEY is still supported.
+  exit /b 1
 )
-
-echo 环境变量已设置
-echo.
-
-REM 检查数据库是否存在
-if not exist "data\company.db" (
-    echo [警告] 业务数据库不存在，正在初始化...
-    cd data
-    python init_db.py
-    cd ..
-    echo 业务数据库初始化完成
-    echo.
-)
-
-if not exist "data\long_term_memory.db" (
-    echo [警告] 记忆数据库不存在，正在初始化...
-    cd data
-    python init_memory_db.py
-    cd ..
-    echo 记忆数据库初始化完成
-    echo.
-)
-
-echo 数据库检查完成
-echo.
-
-echo 正在启动Web服务器...
-echo.
-echo 访问地址: http://localhost:5000
-echo.
-echo 按 Ctrl+C 停止服务器
-echo =====================================
-echo.
-
-python app.py
-
-pause
-
+if not defined FLIGHT_DB_PATH set "FLIGHT_DB_PATH=data\flight_weather.db"
+if not exist "%FLIGHT_DB_PATH%" "%PYTHON%" data\init_flight_weather_db.py --db "%FLIGHT_DB_PATH%"
+if errorlevel 1 exit /b 1
+goto serve
+:demo
+if not defined FLIGHT_DB_PATH set "FLIGHT_DB_PATH=data\demo_operations.db"
+if not exist "%FLIGHT_DB_PATH%" "%PYTHON%" data\generate_demo_data.py --db "%FLIGHT_DB_PATH%"
+if errorlevel 1 exit /b 1
+:serve
+echo http://127.0.0.1:%PORT%
+"%PYTHON%" app.py

@@ -12,6 +12,7 @@ import asyncio
 import concurrent.futures
 import time
 import re
+import os
 from typing import Dict, Any
 from pathlib import Path
 
@@ -130,27 +131,8 @@ class SQLQueryAgent:
         return anchor
 
     def _apply_time_anchor(self, sql: str) -> str:
-        """将 SQL 中基于当前时间的表达式替换为基于数据最大时间的表达式。"""
-        if not sql:
-            return sql
-
-        anchor = self._get_data_time_anchor()
-        max_ts = anchor.get("max_ts")
-        if not max_ts:
-            return sql
-
-        patched = sql
-        ts_expr = f"datetime('{max_ts}')"
-        date_expr = f"date('{max_ts}')"
-
-        # 统一处理 SQLite / MySQL 风格当前时间写法
-        patched = re.sub(r"datetime\(\s*'now'\s*", f"datetime('{max_ts}'", patched, flags=re.IGNORECASE)
-        patched = re.sub(r"date\(\s*'now'\s*", f"date('{max_ts}'", patched, flags=re.IGNORECASE)
-        patched = re.sub(r"\bcurrent_timestamp\b", ts_expr, patched, flags=re.IGNORECASE)
-        patched = re.sub(r"\bcurrent_date\b", date_expr, patched, flags=re.IGNORECASE)
-        patched = re.sub(r"\bnow\s*\(\s*\)", ts_expr, patched, flags=re.IGNORECASE)
-
-        return patched
+        """Preserve SQL literals; the time contract is supplied before generation."""
+        return sql
     
     def _clean_sql(self, sql: str) -> str:
         """清理SQL语句（移除代码块标记和多余前缀）"""
@@ -222,37 +204,17 @@ class SQLQueryAgent:
             schema=schema,
             num_examples=self.num_examples
         )
+        from tools.metrics import METRICS
+        prompt += f"\n实际数据时间范围：{self._get_data_time_anchor()}。"
+        prompt += f"\n强制指标约定（优先于旧示例）：到达延误率表达式为 {METRICS['arr_delay_rate']}；平均到达延误为 {METRICS['avg_arr_delay']}。NULL 不等于 0。最近 N 天包含最大日期，应减 N-1 天。正延误总分钟用 SUM(MAX(ARR_DELAY,0))，不要用提前到达抵消延误。天气分组未知值单列；降水与取消同时出现不证明天气导致取消。禁止将本地样本称为完整行业总体。"
         sql = self._llm_to_str(self.llm.invoke(prompt)).strip()
         sql = self._clean_sql(sql)
         sql = self._apply_time_anchor(sql)
         return sql
 
     def _validate_readonly_sql(self, sql: str) -> Dict[str, Any]:
-        """校验 SQL 是否为只读语句，阻断破坏性或高风险语句。"""
-        if not sql or not sql.strip():
-            return {"ok": False, "reason": "empty_sql"}
-
-        normalized = re.sub(r"\s+", " ", sql).strip().lower()
-
-        # 拦截多语句，降低注入和误执行风险
-        if ";" in normalized[:-1]:
-            return {"ok": False, "reason": "multiple_statements_not_allowed"}
-
-        # 仅允许 SELECT / WITH 开头
-        if not (normalized.startswith("select") or normalized.startswith("with")):
-            return {"ok": False, "reason": "non_readonly_statement"}
-
-        # 防御性黑名单（即使开头是 SELECT 也拦截高危关键词）
-        blocked_tokens = [
-            " drop ", " delete ", " truncate ", " alter ", " create ", " insert ", " update ",
-            " attach ", " detach ", " pragma ", " replace ", " vacuum ", " reindex "
-        ]
-        padded = f" {normalized} "
-        for token in blocked_tokens:
-            if token in padded:
-                return {"ok": False, "reason": f"blocked_token:{token.strip()}"}
-
-        return {"ok": True, "reason": "readonly_sql"}
+        from tools.sql_executor import validate_readonly_sql
+        return validate_readonly_sql(sql)
     
     def _correct_sql(self, question: str, original_sql: str, error_msg: str, attempt: int) -> str:
         """SQL 自动纠错（Reflection 模式）
@@ -276,6 +238,8 @@ class SQLQueryAgent:
             error_msg=error_msg,
             attempt=attempt
         )
+        from prompts import SYSTEM_PROMPT
+        prompt += '\n修复仍须遵守原业务口径：\n' + SYSTEM_PROMPT.format(schema=schema)
         corrected = self._llm_to_str(self.llm.invoke(prompt)).strip()
         corrected = self._clean_sql(corrected)
         corrected = self._apply_time_anchor(corrected)
@@ -293,11 +257,13 @@ class SQLQueryAgent:
         mcp_script = Path(__file__).parent.parent / "mcp_sql_server.py"
         server_params = StdioServerParameters(
             command=sys.executable,
-            args=[str(mcp_script)]
+            args=[str(mcp_script)],
+            env={**os.environ, "FLIGHT_DB_PATH": str(Path(self.db_path).resolve())}
         )
         
         async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
+            from datetime import timedelta
+            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=15)) as session:
                 await session.initialize()
                 
                 result = await session.call_tool(
@@ -322,7 +288,7 @@ class SQLQueryAgent:
         else:
             return asyncio.run(coro)
     
-    def query(self, question: str, max_retries: int = 3) -> Dict[str, Any]:
+    def query(self, question: str, max_retries: int = 3, initial_sql: str = None) -> Dict[str, Any]:
         """执行查询，失败时自动纠错并重试（Reflection 循环）
         
         流程：SQL生成 → 执行 → [失败] → 错误反馈给LLM → 重新生成 → 最多重试 max_retries 次
@@ -345,12 +311,16 @@ class SQLQueryAgent:
             "error": None,
             "retry_count": 0,
             "failure_stage": None,
-            "latency_ms": None
+            "latency_ms": None,
+            "attempts": []
         }
 
         start_ts = time.time()
+        stage = 'generate'
         try:
-            sql = self._generate_sql(question)
+            if not isinstance(max_retries, int) or not 0 <= max_retries <= 5:
+                raise ValueError('max_retries must be 0..5')
+            sql = initial_sql if initial_sql is not None else self._generate_sql(question)
 
             if self._is_detail_request(question) and self._looks_aggregate_only(sql):
                 sql = self._expand_sql_for_detail_request(question, sql)
@@ -368,14 +338,19 @@ class SQLQueryAgent:
                 result["failure_stage"] = "safety_check"
                 return result
             
-            for attempt in range(max_retries):
+            for attempt in range(max_retries + 1):
+                stage = 'mcp_transport'
+                attempt_started = time.monotonic()
                 query_result = self._run_async(self._execute_sql_via_mcp(sql))
                 result_data = json.loads(query_result)
+                result["attempts"].append({"sql": sql, "error": result_data.get("error") if isinstance(result_data, dict) else None,
+                                           "latency_ms": int((time.monotonic()-attempt_started)*1000)})
                 
                 if isinstance(result_data, dict) and "error" in result_data:
                     error_msg = result_data["error"]
                     
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries:
+                        stage = 'reflection'
                         print(f"[SQL纠错] 第{attempt + 1}次执行失败: {error_msg}，正在让LLM自动修复...")
                         sql = self._correct_sql(question, sql, error_msg, attempt + 1)
 
@@ -394,6 +369,8 @@ class SQLQueryAgent:
                         result["error"] = f"SQL执行失败（已自动重试{attempt}次）: {error_msg}"
                         result["failure_stage"] = "execute"
                 else:
+                    if not isinstance(result_data, list):
+                        raise ValueError('invalid_mcp_result: expected rows or error')
                     result["data"] = query_result
                     if attempt > 0:
                         print(f"[SQL纠错] 第{attempt}次修复后执行成功")
@@ -402,9 +379,8 @@ class SQLQueryAgent:
         except Exception as e:
             result["error"] = f"查询失败: {str(e)}"
             if not result.get("failure_stage"):
-                result["failure_stage"] = "exception"
+                result["failure_stage"] = stage
         finally:
             result["latency_ms"] = int((time.time() - start_ts) * 1000)
         
         return result
-

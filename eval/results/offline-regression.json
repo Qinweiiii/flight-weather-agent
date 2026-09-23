@@ -1,0 +1,173 @@
+{
+  "timestamp": "2026-09-18T11:24:36.875457+00:00",
+  "python": "3.14.7",
+  "mode": "offline_regression_scripted_llm_not_model_accuracy",
+  "tests": 32,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "cases": [
+    {
+      "id": "test_regression.Regression.test_cancel_anomaly",
+      "status": "passed",
+      "latency_ms": 3.8
+    },
+    {
+      "id": "test_regression.Regression.test_daily_and_weekly_windows",
+      "status": "passed",
+      "latency_ms": 2.6
+    },
+    {
+      "id": "test_regression.Regression.test_debate_hard_gates",
+      "status": "passed",
+      "latency_ms": 0.1
+    },
+    {
+      "id": "test_regression.Regression.test_debate_matching_contract_path",
+      "status": "passed",
+      "latency_ms": 0.1
+    },
+    {
+      "id": "test_regression.Regression.test_demo_refuses_unsupported_scope",
+      "status": "passed",
+      "latency_ms": 15.7
+    },
+    {
+      "id": "test_regression.Regression.test_distinct_diagnoses",
+      "status": "passed",
+      "latency_ms": 11.2
+    },
+    {
+      "id": "test_regression.Regression.test_empty_scope_no_fake_recommendation",
+      "status": "passed",
+      "latency_ms": 3.4
+    },
+    {
+      "id": "test_regression.Regression.test_explicit_memory_survives_new_instance",
+      "status": "passed",
+      "latency_ms": 18.8
+    },
+    {
+      "id": "test_regression.Regression.test_flask_session_and_memory_scope",
+      "status": "passed",
+      "latency_ms": 371.3
+    },
+    {
+      "id": "test_regression.Regression.test_generation_and_reflection_failure_stages",
+      "status": "passed",
+      "latency_ms": 286.9
+    },
+    {
+      "id": "test_regression.Regression.test_graph_memory_no_duplicate_messages",
+      "status": "passed",
+      "latency_ms": 13.9
+    },
+    {
+      "id": "test_regression.Regression.test_guardrail_attacks",
+      "status": "passed",
+      "latency_ms": 0.1
+    },
+    {
+      "id": "test_regression.Regression.test_invalid_csv_preserves_database",
+      "status": "passed",
+      "latency_ms": 2.9
+    },
+    {
+      "id": "test_regression.Regression.test_live_critic_reviews_ops_without_mutating_numbers",
+      "status": "passed",
+      "latency_ms": 12.1
+    },
+    {
+      "id": "test_regression.Regression.test_live_route_failure_is_not_greeting",
+      "status": "passed",
+      "latency_ms": 9.4
+    },
+    {
+      "id": "test_regression.Regression.test_mcp_database_selection",
+      "status": "passed",
+      "latency_ms": 300.8
+    },
+    {
+      "id": "test_regression.Regression.test_mcp_direct_attack",
+      "status": "passed",
+      "latency_ms": 252.2
+    },
+    {
+      "id": "test_regression.Regression.test_memory_user_isolation_and_clear",
+      "status": "passed",
+      "latency_ms": 8.5
+    },
+    {
+      "id": "test_regression.Regression.test_metric_denominators",
+      "status": "passed",
+      "latency_ms": 2.7
+    },
+    {
+      "id": "test_regression.Regression.test_missing_db_does_not_create_file",
+      "status": "passed",
+      "latency_ms": 0.1
+    },
+    {
+      "id": "test_regression.Regression.test_no_retry_means_one_execution",
+      "status": "passed",
+      "latency_ms": 252.3
+    },
+    {
+      "id": "test_regression.Regression.test_parallel_sql_and_search",
+      "status": "passed",
+      "latency_ms": 13.6
+    },
+    {
+      "id": "test_regression.Regression.test_parameter_validation",
+      "status": "passed",
+      "latency_ms": 0.1
+    },
+    {
+      "id": "test_regression.Regression.test_reflection_exhausted",
+      "status": "passed",
+      "latency_ms": 497.0
+    },
+    {
+      "id": "test_regression.Regression.test_reflection_success",
+      "status": "passed",
+      "latency_ms": 522.1
+    },
+    {
+      "id": "test_regression.Regression.test_registry_permissions",
+      "status": "passed",
+      "latency_ms": 3.8
+    },
+    {
+      "id": "test_regression.Regression.test_result_comparison_preserves_meaning",
+      "status": "passed",
+      "latency_ms": 2.1
+    },
+    {
+      "id": "test_regression.Regression.test_scenario_is_component_based",
+      "status": "passed",
+      "latency_ms": 6.8
+    },
+    {
+      "id": "test_regression.Regression.test_sql_literals_and_empty_rows",
+      "status": "passed",
+      "latency_ms": 0.4
+    },
+    {
+      "id": "test_regression.Regression.test_sql_resource_bounds",
+      "status": "passed",
+      "latency_ms": 10.6
+    },
+    {
+      "id": "test_regression.Regression.test_sql_write_attacks",
+      "status": "passed",
+      "latency_ms": 0.5
+    },
+    {
+      "id": "test_regression.Regression.test_sse_runs_graph_and_done_is_last",
+      "status": "passed",
+      "latency_ms": 16.5
+    }
+  ],
+  "live_nl2sql_accuracy": null,
+  "live_search_validated": false
+}

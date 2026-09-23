@@ -85,3 +85,34 @@ skills:
     output_schema:
       report: "Markdown operations summary."
       metrics: "Structured KPI rows used by the report."
+
+  - name: RootCauseSkill
+    type: skill
+    description: "Rank likely disruption drivers across weather, airport congestion, and carrier-controlled delay components."
+    entrypoint: "tools.ops_decision_skills.RootCauseSkill"
+    permissions:
+      - database:read
+    input_schema:
+      period_days: "Recent operating window to diagnose."
+      origin: "Optional departure airport code."
+      carrier: "Optional carrier code."
+    output_schema:
+      baseline: "Recent-window operating KPIs."
+      weather_buckets: "High/normal weather comparison."
+      ranked_factors: "Ranked root-cause factors with evidence snippets."
+
+  - name: OpsPlaybookSkill
+    type: skill
+    description: "Convert diagnosed root causes into operational playbooks, owners, horizons, and rough impact estimates."
+    entrypoint: "tools.ops_decision_skills.OpsPlaybookSkill"
+    permissions:
+      - database:read
+      - local:compute
+    input_schema:
+      diagnosis: "Output from RootCauseSkill."
+      top_n: "Maximum number of playbooks to return."
+      assumed_delay_reduction_pct: "Scenario assumption for rough impact estimate."
+    output_schema:
+      recommendations: "Action playbooks mapped to root-cause evidence."
+      impact_estimate: "Rough minutes-saved estimate under the scenario assumption."
+      next_step: "Recommended follow-up data/action loop."

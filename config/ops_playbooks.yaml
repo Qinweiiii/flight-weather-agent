@@ -1,0 +1,49 @@
+version: 2
+description: "人工维护的复盘与试点候选，不是自动调度指令或收益承诺。"
+playbooks:
+  weather:
+    label: "天气暴露与恢复能力复核"
+    levers:
+      - name: "复核天气日的地面保障与恢复预案覆盖"
+        owner: "运行控制 / 机场保障"
+        horizon: "下一次运营复盘"
+        rationale: "先核对当时天气、跑道容量和保障日志，再评估备用资源配置；历史样本不能触发今天的天气告警。"
+      - name: "评估高风险时段的缓冲与恢复资源试点"
+        owner: "网络计划 / 运行控制"
+        horizon: "下个计划周期"
+        rationale: "需要同航线时段对照并衡量容量、成本与取消率代价。"
+  late_aircraft:
+    label: "前序晚到传播复核"
+    levers:
+      - name: "核对热点机场与航司的飞机周转链及地面缓冲"
+        owner: "机队运行 / 网络计划"
+        horizon: "下一轮周计划评审"
+        rationale: "前序晚到是传播表征；需尾号与航段关联数据确认源头，不能直接归责航司。"
+  airport_congestion:
+    label: "NAS 综合原因待细分"
+    levers:
+      - name: "核对 NAS 延误对应的流控、天气与机场运行记录"
+        owner: "运行控制 / 机场运行分析"
+        horizon: "下一次联合复盘"
+        rationale: "当前字段无法区分拥堵、非极端天气与流控，先补证据再考虑调整航班波或保障能力。"
+  carrier_operations:
+    label: "航司报告原因复核"
+    levers:
+      - name: "检查热点航班的维护、机组和地面周转事件"
+        owner: "机务 / 机组计划 / 地面保障"
+        horizon: "下一轮运营复盘"
+        rationale: "聚合航司原因不能直接定位某个部门，需事件日志细分后选择小范围试点。"
+  security:
+    label: "安保原因复核"
+    levers:
+      - name: "核验报告安保延误的事件与保障记录"
+        owner: "机场运行 / 安保协调"
+        horizon: "下一次专题复盘"
+        rationale: "只做记录核验，不建议降低安保标准。"
+  evidence_gap:
+    label: "证据不足，先补数据"
+    levers:
+      - name: "补齐原因记录、尾号周转与保障事件数据"
+        owner: "数据平台 / 运营分析"
+        horizon: "下一轮数据质量修复"
+        rationale: "无足够原因覆盖时不推荐具体运营调整，也不计算收益。"

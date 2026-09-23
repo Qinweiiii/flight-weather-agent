@@ -1,0 +1,62 @@
+{
+  "react.js": {
+    "url": "https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js",
+    "sha256": "d949f1c3687aedadcedac85261865f29b17cd273997e7f6b2bfc53b2f9d4c4dd",
+    "bytes": 10751
+  },
+  "react-dom.js": {
+    "url": "https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js",
+    "sha256": "35f4f974f4b2bcd44da73963347f8952e341f83909e4498227d4e26b98f66f0d",
+    "bytes": 131835
+  },
+  "babel.js": {
+    "url": "https://cdn.jsdelivr.net/npm/@babel/standalone@7.26.4/babel.min.js",
+    "sha256": "a12872ea8da3d29b2a296c51bfac7c482e81419c755f2207a49ad9b77200f4ea",
+    "bytes": 2983904
+  },
+  "marked.js": {
+    "url": "https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js",
+    "sha256": "15fabce5b65898b32b03f5ed25e9f891a729ad4c0d6d877110a7744aa847a894",
+    "bytes": 35479
+  },
+  "purify.js": {
+    "url": "https://cdn.jsdelivr.net/npm/dompurify@3.3.1/dist/purify.min.js",
+    "sha256": "9b494057fad6656fd9ce2089d0b6898df9632c10e45e4775a43073a46cffc8cb",
+    "bytes": 23129
+  },
+  "echarts.js": {
+    "url": "https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js",
+    "sha256": "42f8329d989b6f6539dd2b15bbdf0d82025762ac112fbb60dc57b27d7bcf3946",
+    "bytes": 1029203
+  },
+  "react.LICENSE": {
+    "url": "https://cdn.jsdelivr.net/npm/react@18.3.1/LICENSE",
+    "sha256": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85",
+    "bytes": 1086
+  },
+  "react-dom.LICENSE": {
+    "url": "https://cdn.jsdelivr.net/npm/react-dom@18.3.1/LICENSE",
+    "sha256": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85",
+    "bytes": 1086
+  },
+  "babel.LICENSE": {
+    "url": "https://cdn.jsdelivr.net/npm/@babel/standalone@7.26.4/LICENSE",
+    "sha256": "117da2af0d4ce0fe1c8e19b5cff9dcd806adf973d328d27b11d4448c4ff24f76",
+    "bytes": 1106
+  },
+  "marked.LICENSE": {
+    "url": "https://cdn.jsdelivr.net/npm/marked@12.0.2/LICENSE.md",
+    "sha256": "8e3a3f82f59a60958f56ca08f445647c32a4733dc7ca6c2c46f6eb898471ab9c",
+    "bytes": 2942
+  },
+  "purify.LICENSE": {
+    "url": "https://cdn.jsdelivr.net/npm/dompurify@3.3.1/LICENSE",
+    "sha256": "1b02e03c3fb4f87d476c128f0eb9def1f5a1709d28b180465228bd41574623b7",
+    "bytes": 27729
+  },
+  "echarts.LICENSE": {
+    "url": "https://cdn.jsdelivr.net/npm/echarts@5.5.0/LICENSE",
+    "sha256": "634293835b43a6dd2094fa39182a3d9a6b9ca43b7fdb9ac354e8037af2a3093a",
+    "bytes": 11990
+  }
+}

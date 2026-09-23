@@ -94,7 +94,7 @@ SQL结果：{sql_result or '无'}
             total_score = sum(normalized_rubric.values())
 
             status_raw = str(data.get("status", "")).lower()
-            status = "pass" if ("pass" in status_raw or total_score >= 16) else "revise"
+            status = "pass" if status_raw == 'pass' and total_score >= 16 else "revise"
 
             issues = data.get("issues", [])
             if not isinstance(issues, list):
@@ -133,7 +133,7 @@ SQL结果：{sql_result or '无'}
                 }
             except Exception:
                 return {
-                    "status": "pass",
+                    "status": "unavailable",
                     "answer": draft_answer,
                     "rubric": {
                         "groundedness": 3,

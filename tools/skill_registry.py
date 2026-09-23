@@ -57,7 +57,26 @@ class SkillRegistry:
     def __init__(self, specs: List[SkillSpec], version: int = 1, description: str = ""):
         self.version = version
         self.description = description
+        if len({spec.name for spec in specs}) != len(specs):
+            raise ValueError('Duplicate skill name')
         self._specs = {spec.name: spec for spec in specs}
+        self._handlers = {}
+
+    def bind(self, name, handler):
+        self.get(name)
+        if not callable(handler):
+            raise TypeError('Skill handler must be callable')
+        self._handlers[name] = handler
+
+    def invoke(self, name, granted_permissions, **params):
+        spec = self.get(name)
+        if set(spec.permissions) - set(granted_permissions):
+            raise PermissionError(f'Missing skill permission: {name}')
+        if set(params) - set(spec.input_schema):
+            raise ValueError(f'Unknown inputs for {name}')
+        if name not in self._handlers:
+            raise ValueError(f'Unbound skill: {name}')
+        return self._handlers[name](**params)
 
     @classmethod
     def from_file(cls, path: str | Path) -> "SkillRegistry":

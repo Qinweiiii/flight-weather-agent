@@ -1,287 +1,143 @@
-"""Thin wrappers around existing Agentic BI capabilities.
-
-These classes are deliberately small. They make capabilities explicit for
-interview discussion and future routing, without replacing the current
-LangGraph workflow.
-"""
-
+"""Small, bounded operational skills sharing one metric contract."""
 import json
-import sqlite3
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+import math
+from tools.sql_executor import read_rows, execute_json, validate_readonly_sql
+from tools.metrics import ARR_VALID, METRICS, KPI_SELECT, window, scope_clause, fmt
 
 
 class SQLTool:
-    """Read-only SQL tool.
+    validate_readonly_sql = staticmethod(validate_readonly_sql)
 
-    When an SQLQueryAgent is supplied, `run_question` uses the existing NL2SQL
-    and SQL Reflection loop. `run_sql` is deterministic and useful for tests or
-    internal skills.
-    """
+    def __init__(self, db_path, sql_agent=None):
+        self.db_path, self.sql_agent = db_path, sql_agent
 
-    def __init__(self, db_path: str, sql_agent: Optional[Any] = None):
-        self.db_path = db_path
-        self.sql_agent = sql_agent
-
-    @staticmethod
-    def validate_readonly_sql(sql: str) -> Dict[str, Any]:
-        normalized = " ".join((sql or "").strip().lower().split())
-        if not normalized:
-            return {"ok": False, "reason": "empty_sql"}
-        if ";" in normalized[:-1]:
-            return {"ok": False, "reason": "multiple_statements_not_allowed"}
-        if not (normalized.startswith("select") or normalized.startswith("with")):
-            return {"ok": False, "reason": "non_readonly_statement"}
-        blocked = [
-            " drop ", " delete ", " truncate ", " alter ", " create ", " insert ",
-            " update ", " attach ", " detach ", " pragma ", " replace ", " vacuum "
-        ]
-        padded = f" {normalized} "
-        for token in blocked:
-            if token in padded:
-                return {"ok": False, "reason": f"blocked_token:{token.strip()}"}
-        return {"ok": True, "reason": "readonly_sql"}
-
-    def run_question(self, question: str, max_retries: int = 3) -> Dict[str, Any]:
-        if not self.sql_agent:
-            return {"error": "SQLQueryAgent is required for natural-language SQL mode"}
+    def run_question(self, question, max_retries=3):
+        if self.sql_agent is None:
+            raise ValueError("SQLQueryAgent is required")
         return self.sql_agent.query(question, max_retries=max_retries)
 
-    def run_sql(self, sql: str) -> Dict[str, Any]:
-        check = self.validate_readonly_sql(sql)
-        if not check["ok"]:
-            return {"sql": sql, "data": None, "error": f"SQL safety check failed: {check['reason']}"}
-
-        try:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute(sql)
-            rows = [dict(row) for row in cur.fetchall()]
-            return {"sql": sql, "data": json.dumps(rows, ensure_ascii=False), "error": None}
-        except Exception as e:
-            return {"sql": sql, "data": None, "error": str(e)}
-        finally:
-            if "conn" in locals():
-                conn.close()
+    def run_sql(self, sql):
+        data = execute_json(self.db_path, sql)
+        payload = json.loads(data)
+        error = payload.get('error') if isinstance(payload, dict) else None
+        return {"sql": sql, "data": None if error else data, "error": error}
 
 
 class SearchTool:
-    """External benchmark search wrapper."""
-
-    def __init__(self, search_agent: Any):
+    def __init__(self, search_agent):
         self.search_agent = search_agent
 
-    def search(self, question: str) -> Dict[str, Any]:
-        if not self.search_agent:
-            return {"answer": None, "sources": [], "quality": {}, "error": "Search agent is not configured"}
+    def search(self, question):
         return self.search_agent.search(question)
 
 
 class ChartTool:
-    """Deterministic ECharts option generator for tabular data."""
-
-    @staticmethod
-    def _parse_data(data: Any) -> List[Dict[str, Any]]:
-        if isinstance(data, str):
-            data = json.loads(data)
-        if isinstance(data, dict):
-            return [data]
-        if isinstance(data, list):
-            return [row for row in data if isinstance(row, dict)]
-        return []
-
-    def generate(self, data: Any, title: str = "") -> Dict[str, Any]:
-        rows = self._parse_data(data)
-        if len(rows) < 2:
-            return {"chart": None, "error": "Need at least two rows to build a chart"}
-
-        keys = list(rows[0].keys())
-        x_key = next((k for k in keys if not isinstance(rows[0].get(k), (int, float))), keys[0])
-        y_key = next((k for k in keys if isinstance(rows[0].get(k), (int, float))), None)
+    def generate(self, data, title="", x_key=None, y_key=None):
+        rows = json.loads(data) if isinstance(data, str) else data
+        if not isinstance(rows, list) or len(rows) < 2:
+            return {"chart": None, "error": "Need at least two rows"}
+        keys = list(rows[0])
+        x_key = x_key or next((k for k in keys if isinstance(rows[0][k], str)), keys[0])
+        measures = [k for k in keys if k != x_key and isinstance(rows[0][k], (int, float))]
+        y_key = y_key or next((k for k in measures if any(s in k.lower() for s in ('rate', 'metric', 'delta', 'delay', 'minutes'))), measures[0] if measures else None)
         if not y_key:
-            return {"chart": None, "error": "No numeric field found"}
-
-        chart = {
-            "title": {"text": title or y_key},
-            "tooltip": {"trigger": "axis"},
-            "xAxis": {"type": "category", "data": [str(row.get(x_key, "")) for row in rows[:20]]},
-            "yAxis": {"type": "value"},
-            "series": [{
-                "name": y_key,
-                "type": "bar",
-                "data": [row.get(y_key, 0) for row in rows[:20]],
-            }],
-        }
-        return {"chart": chart, "error": None}
+            return {"chart": None, "error": "No numeric measure"}
+        horizontal = any(len(str(r.get(x_key, ''))) > 10 for r in rows[:20])
+        categories = {"type": "category", "data": [str(r.get(x_key, '')) for r in rows[:20]],
+                      "axisLabel": {"interval": 0, "width": 125, "overflow": "truncate"}}
+        scale = 1000 if y_key=='minutes' and max((abs(r.get(y_key) or 0) for r in rows[:20]), default=0)>=10000 else 1
+        unit = ('千分钟' if scale==1000 else '分钟') if y_key=='minutes' else y_key
+        values = {"type": "value", "splitNumber": 3, "axisLabel": {"hideOverlap": True}}
+        if horizontal:
+            categories['inverse'] = True
+        return {"chart": {"title": {"text": title or y_key, "subtext": f'单位：{unit}', "textStyle": {"fontSize": 14}},
+                "grid": {"left": 12, "right": 25, "top": 55, "bottom": 20, "containLabel": True},
+                "tooltip": {"trigger": "axis", "renderMode": "richText"},
+                "xAxis": values if horizontal else categories,
+                "yAxis": categories if horizontal else values,
+                "series": [{"name": unit, "type": "bar", "data": [r[y_key]/scale if isinstance(r.get(y_key),(int,float)) else None for r in rows[:20]]}]}, "error": None}
 
 
 class _SQLiteSkill:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path):
         self.db_path = db_path
 
-    def _query(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            cur = conn.cursor()
-            cur.execute(sql, params)
-            return [dict(row) for row in cur.fetchall()]
-        finally:
-            conn.close()
-
-    def _data_period(self) -> Dict[str, Optional[str]]:
-        rows = self._query("SELECT MIN(FL_DATE) AS min_date, MAX(FL_DATE) AS max_date FROM flights_enriched")
-        return rows[0] if rows else {"min_date": None, "max_date": None}
+    def _query(self, sql, params=()):
+        return read_rows(self.db_path, sql, params)
 
 
 class AnomalySkill(_SQLiteSkill):
-    """Compare a recent period with the previous period for key dimensions."""
-
-    METRICS = {
-        "arr_delay_rate": "AVG(COALESCE(ARR_DEL15, 0))",
-        "cancel_rate": "AVG(COALESCE(CANCELLED, 0))",
-        "avg_arr_delay": "AVG(COALESCE(ARR_DELAY, 0))",
-    }
+    METRICS = METRICS
     DIMENSIONS = {"ORIGIN", "DEST", "OP_UNIQUE_CARRIER"}
 
-    def scan(
-        self,
-        metric: str = "arr_delay_rate",
-        dimension: str = "ORIGIN",
-        period_days: int = 30,
-        min_flights: int = 100,
-        limit: int = 10,
-    ) -> Dict[str, Any]:
-        metric_expr = self.METRICS.get(metric)
-        dim = dimension.upper()
-        if not metric_expr:
-            return {"anomalies": [], "error": f"Unsupported metric: {metric}"}
-        if dim not in self.DIMENSIONS:
-            return {"anomalies": [], "error": f"Unsupported dimension: {dimension}"}
-
-        sql = f"""
-        WITH anchor AS (
-            SELECT MAX(FL_DATE) AS max_date FROM flights_enriched
-        ),
-        bucketed AS (
-            SELECT
-                {dim} AS dimension_value,
-                CASE
-                    WHEN FL_DATE >= date((SELECT max_date FROM anchor), '-' || ? || ' day') THEN 'recent'
-                    WHEN FL_DATE >= date((SELECT max_date FROM anchor), '-' || (? * 2) || ' day') THEN 'previous'
-                END AS bucket,
-                {metric_expr} AS metric_value,
-                COUNT(*) AS flight_cnt
-            FROM flights_enriched
-            WHERE FL_DATE >= date((SELECT max_date FROM anchor), '-' || (? * 2) || ' day')
-            GROUP BY dimension_value, bucket
-            HAVING flight_cnt >= ?
-        )
-        SELECT
-            r.dimension_value,
-            r.metric_value AS recent_value,
-            p.metric_value AS previous_value,
-            r.metric_value - p.metric_value AS delta_value,
-            r.flight_cnt AS recent_flights,
-            p.flight_cnt AS previous_flights
-        FROM bucketed r
-        JOIN bucketed p ON r.dimension_value = p.dimension_value
-        WHERE r.bucket = 'recent' AND p.bucket = 'previous'
-        ORDER BY ABS(delta_value) DESC
-        LIMIT ?
-        """
-        rows = self._query(sql, (period_days, period_days, period_days, min_flights, limit))
-        return {
-            "anomalies": rows,
-            "metric": metric,
-            "dimension": dim,
-            "period_days": period_days,
-            "data_period": self._data_period(),
-            "error": None,
-        }
+    def scan(self, metric="arr_delay_rate", dimension="ORIGIN", period_days=30, min_flights=30, limit=10):
+        if metric not in METRICS or dimension not in self.DIMENSIONS:
+            raise ValueError("Unsupported metric or dimension")
+        if not 1 <= min_flights or not 1 <= limit <= 100:
+            raise ValueError("Invalid sample threshold or limit")
+        w = window(self.db_path, period_days)
+        denom = f"SUM(CASE WHEN {ARR_VALID} THEN 1 ELSE 0 END)" if metric != "cancel_rate" else "SUM(CASE WHEN CANCELLED IN (0,1) THEN 1 ELSE 0 END)"
+        sql = f"""WITH buckets AS (
+          SELECT {dimension} AS dimension_value,
+            CASE WHEN FL_DATE >= ? THEN 'recent' ELSE 'previous' END AS bucket,
+            {METRICS[metric]} AS metric_value, COUNT(*) AS flight_cnt, {denom} AS observed
+          FROM flights_enriched WHERE FL_DATE BETWEEN ? AND ?
+          GROUP BY 1,2 HAVING observed >= ?)
+          SELECT r.dimension_value, r.metric_value AS recent_value, p.metric_value AS previous_value,
+            r.metric_value-p.metric_value AS delta_value, r.flight_cnt AS recent_flights,
+            p.flight_cnt AS previous_flights, r.observed AS recent_observed, p.observed AS previous_observed
+          FROM buckets r JOIN buckets p ON r.dimension_value=p.dimension_value
+          WHERE r.bucket='recent' AND p.bucket='previous'
+          ORDER BY delta_value DESC, r.dimension_value LIMIT ?"""
+        rows = self._query(sql, (w['start'], w['previous_start'], w['end'], min_flights, limit))
+        for row in rows:
+            # Exploratory screening, not a multiple-testing-corrected causal finding.
+            if metric.endswith('rate'):
+                a, b = row['recent_value'], row['previous_value']
+                se = math.sqrt(a*(1-a)/row['recent_observed'] + b*(1-b)/row['previous_observed'])
+                row['delta_ci95'] = [row['delta_value']-1.96*se, row['delta_value']+1.96*se]
+                row['flagged'] = row['delta_value'] >= .03 and row['delta_ci95'][0] > 0
+            else:
+                row['flagged'] = row['delta_value'] >= 5
+        return {"anomalies": rows, "metric": metric, "dimension": dimension, "period_days": period_days,
+                "data_period": w, "sql": sql, "params": [w['start'], w['previous_start'], w['end'], min_flights, limit],
+                "note": "探索性筛查，未校正多重比较；需排查航线构成、季节及样本变化。", "error": None}
 
 
 class WeatherImpactSkill(_SQLiteSkill):
-    """Analyze precipitation exposure versus delay/cancellation outcomes."""
-
-    def analyze(self, precipitation_threshold: float = 2.0, period_days: int = 90) -> Dict[str, Any]:
-        sql = """
-        WITH anchor AS (
-            SELECT MAX(FL_DATE) AS max_date FROM flights_enriched
-        )
-        SELECT
-            CASE
-                WHEN COALESCE(prcp_ORIGIN, 0) > ? OR COALESCE(prcp_DEST, 0) > ?
-                THEN 'high_precipitation'
-                ELSE 'low_precipitation'
-            END AS weather_bucket,
-            COUNT(*) AS flight_cnt,
-            AVG(COALESCE(ARR_DELAY, 0)) AS avg_arr_delay_min,
-            AVG(COALESCE(DEP_DELAY, 0)) AS avg_dep_delay_min,
-            AVG(COALESCE(ARR_DEL15, 0)) AS arr_delay_rate,
-            AVG(COALESCE(CANCELLED, 0)) AS cancel_rate
-        FROM flights_enriched
-        WHERE FL_DATE >= date((SELECT max_date FROM anchor), '-' || ? || ' day')
-        GROUP BY weather_bucket
-        ORDER BY weather_bucket
-        """
-        rows = self._query(sql, (precipitation_threshold, precipitation_threshold, period_days))
-        interpretation = "Insufficient bucket data for comparison."
-        if len(rows) == 2:
-            by_bucket = {row["weather_bucket"]: row for row in rows}
-            high = by_bucket.get("high_precipitation")
-            low = by_bucket.get("low_precipitation")
-            if high and low:
-                delay_delta = high["avg_arr_delay_min"] - low["avg_arr_delay_min"]
-                cancel_delta = high["cancel_rate"] - low["cancel_rate"]
-                interpretation = (
-                    f"High precipitation flights show {delay_delta:.2f} more arrival-delay minutes "
-                    f"and {cancel_delta:.2%} higher cancellation rate than low precipitation flights."
-                )
-        return {
-            "buckets": rows,
-            "precipitation_threshold": precipitation_threshold,
-            "period_days": period_days,
-            "interpretation": interpretation,
-            "data_period": self._data_period(),
-            "error": None,
-        }
+    def analyze(self, precipitation_threshold=2.0, period_days=90, origin=None, carrier=None):
+        if not 0 <= precipitation_threshold <= 1000:
+            raise ValueError("Invalid precipitation threshold")
+        w = window(self.db_path, period_days)
+        scope, values = scope_clause(origin, carrier)
+        sql = f"""SELECT CASE
+            WHEN prcp_ORIGIN > ? OR prcp_DEST > ? THEN 'high_precipitation'
+            WHEN prcp_ORIGIN IS NULL OR prcp_DEST IS NULL THEN 'unknown'
+            ELSE 'low_precipitation' END AS weather_bucket, {KPI_SELECT}
+            FROM flights_enriched WHERE FL_DATE BETWEEN ? AND ? {scope}
+            GROUP BY 1 ORDER BY 1"""
+        rows = self._query(sql, (precipitation_threshold, precipitation_threshold, w['start'], w['end'], *values))
+        buckets = {r['weather_bucket']: r for r in rows}
+        high, low = buckets.get('high_precipitation'), buckets.get('low_precipitation')
+        delta = None
+        if high and low and high['arrival_observed'] >= 30 and low['arrival_observed'] >= 30:
+            delta = high['arr_delay_rate']-low['arr_delay_rate']
+        return {"buckets": rows, "delta_rate": delta, "period_days": period_days,
+                "precipitation_threshold": precipitation_threshold, "data_period": w,
+                "interpretation": "降水分组仅表示相关性，未控制机场、航线、时段等混杂因素；缺失天气单列。" if delta is not None else "分组有效样本不足，不输出天气效应结论。", "error": None}
 
 
 class ReportSkill(_SQLiteSkill):
-    """Generate a deterministic operations summary."""
-
-    def generate(self, period: str = "weekly") -> Dict[str, Any]:
-        days = 7 if period == "weekly" else 1
-        sql = """
-        WITH anchor AS (
-            SELECT MAX(FL_DATE) AS max_date FROM flights_enriched
-        )
-        SELECT
-            COUNT(*) AS flight_cnt,
-            AVG(COALESCE(DEP_DELAY, 0)) AS avg_dep_delay_min,
-            AVG(COALESCE(ARR_DELAY, 0)) AS avg_arr_delay_min,
-            AVG(COALESCE(DEP_DEL15, 0)) AS dep_delay_rate,
-            AVG(COALESCE(ARR_DEL15, 0)) AS arr_delay_rate,
-            AVG(COALESCE(CANCELLED, 0)) AS cancel_rate,
-            AVG(COALESCE(DIVERTED, 0)) AS divert_rate,
-            MIN(FL_DATE) AS period_start,
-            MAX(FL_DATE) AS period_end
-        FROM flights_enriched
-        WHERE FL_DATE >= date((SELECT max_date FROM anchor), '-' || ? || ' day')
-        """
-        rows = self._query(sql, (days,))
-        metrics = rows[0] if rows else {}
-        report = (
-            f"## {period.title()} Flight Operations Summary\n\n"
-            f"- Observation window: {metrics.get('period_start')} to {metrics.get('period_end')}\n"
-            f"- Flights: {metrics.get('flight_cnt', 0)}\n"
-            f"- Avg departure delay: {metrics.get('avg_dep_delay_min', 0):.2f} min\n"
-            f"- Avg arrival delay: {metrics.get('avg_arr_delay_min', 0):.2f} min\n"
-            f"- Departure delay rate: {metrics.get('dep_delay_rate', 0):.2%}\n"
-            f"- Arrival delay rate: {metrics.get('arr_delay_rate', 0):.2%}\n"
-            f"- Cancellation rate: {metrics.get('cancel_rate', 0):.2%}\n"
-            f"- Diversion rate: {metrics.get('divert_rate', 0):.2%}\n"
-        )
-        return {"report": report, "metrics": metrics, "period": period, "error": None}
+    def generate(self, period="weekly"):
+        if period not in ('daily', 'weekly'):
+            raise ValueError("period must be daily or weekly")
+        w = window(self.db_path, 7 if period == 'weekly' else 1)
+        row = self._query(f"SELECT {KPI_SELECT} FROM flights_enriched WHERE FL_DATE BETWEEN ? AND ?", (w['start'], w['end']))[0]
+        row.update(period_start=w['start'], period_end=w['end'])
+        report = (f"## 运营{'周报' if period == 'weekly' else '日报'}\n\n"
+                  f"观测期：{w['start']} 至 {w['end']}\n\n"
+                  f"- 计划航班：{row['flight_cnt']}；有效到达观测：{row['arrival_observed']}\n"
+                  f"- 到达延误率：{fmt(row['arr_delay_rate'], True)}\n"
+                  f"- 取消率：{fmt(row['cancel_rate'], True)}\n"
+                  f"- 平均到达延误：{fmt(row['avg_arr_delay'])} 分钟\n")
+        return {"report": report, "metrics": row, "period": period, "error": None}

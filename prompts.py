@@ -14,25 +14,13 @@ SYSTEM_PROMPT = """你是一个专业的航班数据SQL查询专家，负责将�
 - 航司/航空公司：对应 OP_UNIQUE_CARRIER 字段。
 - 取消口径：指 CANCELLED = 1 的航班。
 - 天气口径：出发地降水用 prcp_ORIGIN，到达地降水用 prcp_DEST。
-- 时间锚点约束：涉及"最近/近N天/月"时，严禁使用 now()/current_date，必须以数据表最大时间为锚点，例：FL_DATE >= date((SELECT MAX(FL_DATE) FROM flights_enriched), '-30 day')
+- 时间锚点约束：最近N天含数据最大日期，减N-1天；最近30天示例：FL_DATE >= date((SELECT MAX(FL_DATE) FROM flights_enriched), '-29 day')。禁止用系统当前时间替代历史数据时间。
 - 条件约束：如果用户问题没有明确指定年份、月份，绝不能自行脑补加上过滤条件（例如绝对不能自作主张加 YEAR=2024 或者 MONTH BETWEEN 1 AND 3）！
-- 对所有数值型字段（如 DEP_DELAY、ARR_DELAY、prcp_ORIGIN、prcp_DEST）在做比较时必须先使用 COALESCE(..., 0) 处理 NULL，除非用户明确要求保留 NULL。
+- NULL 是未知，不得补零成准点或无降水。到达指标排除 CANCELLED=1、DIVERTED=1 和 ARR_DELAY 缺失；延误定义 ARR_DELAY>=15。取消率单独统计。
+- 天气分组未知值单列；同时有雨和取消不能证明天气导致取消。报告 NAS 和前序晚到不能直接解释为机场拥堵和航司过错。
 
 【生成要求】
-请按照以下步骤一步步分析并生成SQL，并将你的思考过程放入 <think> 和 </think> 标签中，最后只输出纯粹的SQL代码块。
-
-步骤1：意图与实体识别
-- 用户的查询意图是什么？
-- 需要用到哪些业务规则？
-
-步骤2：映射数据库
-- 需要哪些字段？是否需要聚合(SUM/AVG/COUNT)？
-
-步骤3：条件检查
-- 有哪些明确的过滤条件(WHERE)？确保没有添加用户未要求的条件。
-
-步骤4：输出SQL
-- 在 <think> 标签结束后，提供代码块 ```sql ... ```。"""
+只输出一条 SQLite SELECT/CTE，不输出思考过程或解释。遵守用户筛选和列顺序；排序并列时使用代码升序稳定排序。明细最多2000行，优先聚合。"""
 
 
 NL2SQL_EXAMPLES = [
@@ -57,7 +45,7 @@ SELECT
     CANCELLED,
     COUNT(*) OVER() AS total_flights_30d
 FROM flights_enriched
-WHERE FL_DATE >= date((SELECT MAX(FL_DATE) FROM flights_enriched), '-30 day')
+WHERE FL_DATE >= date((SELECT MAX(FL_DATE) FROM flights_enriched), '-29 day')
 ORDER BY FL_DATE DESC
 LIMIT 30
 ```"""
@@ -73,12 +61,12 @@ LIMIT 30
 - 条件：最近90天。
 </think>
 ```sql
-SELECT ORIGIN, COUNT(*) AS flight_cnt, AVG(COALESCE(ARR_DEL15, 0)) AS arr_delay_rate
+SELECT ORIGIN, COUNT(*) AS arrival_observed, AVG(CASE WHEN ARR_DELAY>=15 THEN 1.0 ELSE 0.0 END) AS arr_delay_rate
 FROM flights_enriched
-WHERE FL_DATE >= date((SELECT MAX(FL_DATE) FROM flights_enriched), '-90 day')
+WHERE FL_DATE >= date((SELECT MAX(FL_DATE) FROM flights_enriched), '-89 day')
+AND CANCELLED=0 AND DIVERTED=0 AND ARR_DELAY IS NOT NULL
 GROUP BY ORIGIN
-HAVING flight_cnt >= 200
-ORDER BY arr_delay_rate DESC
+ORDER BY arr_delay_rate DESC, ORIGIN
 LIMIT 5
 ```"""
     },
@@ -93,9 +81,10 @@ LIMIT 5
 - 条件：最近90天。
 </think>
 ```sql
-SELECT OP_UNIQUE_CARRIER, AVG(COALESCE(ARR_DELAY, 0)) AS avg_arr_delay_min
+SELECT OP_UNIQUE_CARRIER, AVG(ARR_DELAY) AS avg_arr_delay_min
 FROM flights_enriched
-WHERE FL_DATE >= date((SELECT MAX(FL_DATE) FROM flights_enriched), '-90 day')
+WHERE FL_DATE >= date((SELECT MAX(FL_DATE) FROM flights_enriched), '-89 day')
+AND CANCELLED=0 AND DIVERTED=0 AND ARR_DELAY IS NOT NULL
 GROUP BY OP_UNIQUE_CARRIER
 ORDER BY avg_arr_delay_min DESC
 ```"""
@@ -112,10 +101,11 @@ ORDER BY avg_arr_delay_min DESC
 </think>
 ```sql
 SELECT
-    CASE WHEN COALESCE(prcp_ORIGIN, 0) > 2 THEN 'rain_gt_2mm' ELSE 'rain_le_2mm' END AS rain_bucket,
-    AVG(COALESCE(ARR_DELAY, 0)) AS avg_arr_delay_min,
+    CASE WHEN prcp_ORIGIN IS NULL THEN 'unknown' WHEN prcp_ORIGIN > 2 THEN 'rain_gt_2mm' ELSE 'rain_le_2mm' END AS rain_bucket,
+    AVG(ARR_DELAY) AS avg_arr_delay_min,
     COUNT(*) AS flight_cnt
 FROM flights_enriched
+WHERE CANCELLED=0 AND DIVERTED=0 AND ARR_DELAY IS NOT NULL
 GROUP BY rain_bucket
 ORDER BY avg_arr_delay_min DESC
 ```"""
@@ -126,8 +116,10 @@ ORDER BY avg_arr_delay_min DESC
 def get_few_shot_prompt(question: str, schema: str, num_examples: int = 3) -> str:
     """构建Few-shot提示词"""
     examples_text = ""
+    import re
     for example in NL2SQL_EXAMPLES[:num_examples]:
-        examples_text += f"\n问题：{example['question']}\n{example['sql']}\n"
+        sql = re.search(r'```sql\s*(.*?)```', example['sql'], re.S).group(1).strip()
+        examples_text += f"\n问题：{example['question']}\n{sql}\n"
 
     prompt = f"""{SYSTEM_PROMPT.format(schema=schema)}
 
@@ -254,6 +246,9 @@ def get_analysis_prompt(data_summary: str, raw_data: str, context: str = "") -> 
 3. 趋势分析：如果数据中有趋势或模式，请指出
 4. 异常检测：是否有异常值或不寻常的数据点
 5. 洞察建议：基于数据提供的建议或行动项
+
+不必凑够发现数量。空数据或样本不足要说明；只报告证据支持的统计事实，相关性不是因果。
+不要对少量聚合行再做未经加权的总体平均，也不要编造改善收益。
 
 请用清晰、专业但易懂的语言回答，突出重点。"""
 

@@ -189,12 +189,36 @@ class DebateAgent:
             "3. 引入至少2个高相关外部来源（如 FAA/BTS 官方或行业报告）后再做量化对标。"
         )
 
-    def adjudicate(self, question: str, sql_evidence: str, search_evidence: str) -> Dict[str, Any]:
+    def adjudicate(self, question: str, sql_evidence: str, search_evidence: str,
+                   internal_period=None, search_quality=None, sql_error=None, sources=None, synthetic=False) -> Dict[str, Any]:
         """裁决两路证据，输出最终统一回答。"""
         internal_span = self._extract_year_span(sql_evidence)
         external_span = self._extract_year_span(search_evidence)
 
         scorecard = self._scorecard(question, sql_evidence, search_evidence, internal_span, external_span)
+        # A soft score cannot compensate for missing evidence or incomparable data.
+        if internal_period:
+            internal_span = self._extract_year_span(str(internal_period.get('min_date')) + ' ' + str(internal_period.get('max_date')))
+            scorecard = self._scorecard(question, sql_evidence, search_evidence, internal_span, external_span)
+        reasons = []
+        if synthetic:
+            reasons.append('虚拟数据不能用于真实行业高低判断')
+        if sql_error or not sql_evidence or sql_evidence.strip() == '[]':
+            reasons.append('内部查询失败或为空')
+        if search_quality is not None and not search_quality.get('evidence_enough', False):
+            reasons.append('外部证据不足或搜索未启用')
+        if sources is not None and not sources:
+            reasons.append('无可追溯外部来源')
+        if scorecard.get('time_score', 0) < 5:
+            reasons.append('观测期未知或不重叠')
+        # Search snippets do not establish a matching population and denominator.
+        if search_quality is not None and not search_quality.get('metric_contract_verified', False):
+            reasons.append('指标分母、地区和样本总体尚未核验')
+        if reasons:
+            scorecard.update(decision='low_evidence', blocking_reasons=reasons)
+            return {'answer': '暂不能给出确定性的行业高低判断。\n\n' + '\n'.join('- '+r for r in reasons)
+                    + '\n\n内部查询证据：\n```json\n' + (sql_evidence or '[]')[:6000] + '\n```\n\n下一步：取得同观测期、同地区、同延误阈值及分母的原始统计，再作对比。',
+                    'status': 'low_evidence', 'scorecard': scorecard}
         if scorecard.get("decision") == "low_evidence":
             return {
                 "answer": self._low_evidence_answer(scorecard, sql_evidence),

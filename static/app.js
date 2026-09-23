@@ -4,18 +4,18 @@ const API_BASE_URL = window.location.origin;
 
 const quickStarts = [
   {
-    title: "机场延误诊断",
-    body: "最近90天到达延误率最高的10个出发机场是哪些？",
+    title: "原因与行动",
+    body: "诊断最近30天的延误原因，列出优先复核对象和运营建议。",
     icon: "A",
   },
   {
-    title: "航司取消率",
-    body: "最近90天取消率最高的5家航司是哪些？请给出航班量和取消率。",
+    title: "取消异常筛查",
+    body: "最近30天哪些机场取消率异常？与前30天对比。",
     icon: "C",
   },
   {
-    title: "天气影响归因",
-    body: "比较降水量高于2mm和低于等于2mm时的平均到达延误分钟数。",
+    title: "运营周报",
+    body: "生成运营周报，说明有效观测和延误率口径。",
     icon: "W",
   },
   {
@@ -54,7 +54,7 @@ function renderMarkdown(text) {
         mangle: false,
         headerIds: false,
       });
-      return window.DOMPurify ? window.DOMPurify.sanitize(raw) : raw;
+      if (window.DOMPurify) return window.DOMPurify.sanitize(raw);
     }
   } catch (error) {
     console.warn("Markdown render failed:", error);
@@ -72,10 +72,15 @@ function useSSEChat({ userId, onMemoryRefresh }) {
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
+  const controllerRef = useRef(null);
+  const busyRef = useRef(false);
+  useEffect(() => () => controllerRef.current?.abort(), []);
 
   const sendQuestion = async (question) => {
     const trimmed = question.trim();
-    if (!trimmed || isLoading) return;
+    if (!trimmed || busyRef.current) return;
+    busyRef.current = true;
+    controllerRef.current = new AbortController();
 
     setError("");
     setIsLoading(true);
@@ -121,13 +126,18 @@ function useSSEChat({ userId, onMemoryRefresh }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ user_id: userId, question: trimmed }),
+        signal: controllerRef.current.signal,
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const detail = await response.json();
+        throw new Error(detail.error || `HTTP ${response.status}`);
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
       let fullAnswer = "";
+      let receivedDone = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -152,11 +162,13 @@ function useSSEChat({ userId, onMemoryRefresh }) {
               }],
             }));
           }
-          if (event.type === "quality") patchAssistant({ quality: event.quality || null });
+          if (event.type === "quality") patchAssistant((message) => ({ quality: { ...message.quality, ...event.quality } }));
+          if (event.type === "decision") patchAssistant({ decision: event });
           if (event.type === "sql") {
             patchAssistant({
               sql: event.sql || "",
               retryCount: event.retry_count || 0,
+              sqlParams: event.params || [],
             });
           }
           if (event.type === "sources") patchAssistant({ sources: event.sources || [] });
@@ -172,7 +184,8 @@ function useSSEChat({ userId, onMemoryRefresh }) {
             });
           }
           if (event.type === "done") {
-            if (event.answer && !fullAnswer) {
+            receivedDone = true;
+            if (event.answer !== undefined) {
               fullAnswer = event.answer;
               patchAssistant({ text: fullAnswer });
             }
@@ -180,18 +193,19 @@ function useSSEChat({ userId, onMemoryRefresh }) {
           }
         }
       }
+      if (!receivedDone) throw new Error("连接提前结束，分析结果可能不完整，请重试。");
 
       if (onMemoryRefresh) onMemoryRefresh();
     } catch (err) {
-      const message = err.message || "请求失败";
+      const message = err.name === "AbortError" ? "已停止接收。服务器正在结束当前步骤。" : err.message || "请求失败";
       setError(message);
       patchAssistant({
-        text: `抱歉，发生错误：${message}`,
         error: message,
         status: "",
       });
     } finally {
       setIsLoading(false);
+      busyRef.current = false;
     }
   };
 
@@ -204,7 +218,7 @@ function useSSEChat({ userId, onMemoryRefresh }) {
     }] : []);
   };
 
-  return { messages, isLoading, error, sendQuestion, resetMessages };
+  return { messages, isLoading, error, sendQuestion, resetMessages, stop: () => controllerRef.current?.abort() };
 }
 
 function App() {
@@ -213,6 +227,7 @@ function App() {
   const [activePanel, setActivePanel] = useState("Workbench");
   const [skills, setSkills] = useState([]);
   const [toast, setToast] = useState("");
+  const [dataset, setDataset] = useState(null);
 
   const refreshUserInfo = async () => {
     if (!user?.userId) return;
@@ -224,12 +239,13 @@ function App() {
     }
   };
 
-  const { messages, isLoading, error, sendQuestion, resetMessages } = useSSEChat({
+  const { messages, isLoading, error, sendQuestion, resetMessages, stop } = useSSEChat({
     userId: user?.userId,
     onMemoryRefresh: refreshUserInfo,
   });
 
   useEffect(() => {
+    fetch(`${API_BASE_URL}/api/dataset`).then(r => r.json()).then(setDataset).catch(() => setDataset({ error: "数据状态不可用" }));
     fetch(`${API_BASE_URL}/api/skills`)
       .then((res) => res.json())
       .then((payload) => setSkills(payload?.registry?.skills || []))
@@ -256,25 +272,32 @@ function App() {
 
   const handleNewSession = async () => {
     if (!user) return;
-    const result = await apiCall("new_session", { user_id: user.userId });
-    if (result.success) {
-      setUser((prev) => ({ ...prev, sessionId: result.session_id }));
-      resetMessages("新会话已开始。");
-      setToast("新会话已创建");
-    }
+    if (isLoading) { setToast("请等待当前分析结束"); return; }
+    try {
+      const result = await apiCall("new_session", { user_id: user.userId });
+      if (result.success) {
+        setUser((prev) => ({ ...prev, sessionId: result.session_id }));
+        resetMessages("");
+        setToast("新会话已创建");
+      }
+    } catch (err) { setToast(err.message); }
   };
 
   const handleResetMemory = async () => {
-    if (!window.confirm("确定要重置长期记忆库吗？此操作不可恢复。")) return;
-    const result = await apiCall("reset_memory", { confirm: true });
-    if (result.success) {
-      setUserInfo(null);
-      resetMessages("长期记忆库已重置。");
-      setToast("记忆库已重置");
-    }
+    if (isLoading) { setToast("请等待当前分析结束"); return; }
+    if (!window.confirm("清除当前用户的长期记忆？其他用户不受影响。")) return;
+    try {
+      const result = await apiCall("reset_memory", { confirm: true, user_id: user.userId });
+      if (result.success) {
+        setUser((prev) => ({ ...prev, sessionId: result.session_id }));
+        resetMessages("");
+        await refreshUserInfo();
+        setToast("当前用户记忆已清除");
+      }
+    } catch (err) { setToast(err.message); }
   };
 
-  if (!user) return <LoginPanel onLogin={handleLogin} />;
+  if (!user) return <LoginPanel onLogin={handleLogin} dataset={dataset} />;
 
   return (
     <div className="app-shell">
@@ -289,11 +312,14 @@ function App() {
         skills={skills}
       />
       <main className="workspace">
-        <TopBar activePanel={activePanel} onPanelChange={setActivePanel} />
+        <TopBar activePanel={activePanel} onPanelChange={setActivePanel} onNewSession={handleNewSession} />
+        <DatasetBanner dataset={dataset} />
         {activePanel === "Memory" ? (
           <MemoryPanel userInfo={userInfo} onRefresh={refreshUserInfo} onReset={handleResetMemory} />
         ) : activePanel === "Skills" ? (
           <SkillPanel skills={skills} />
+        ) : activePanel === "Trace" ? (
+          <section className="panel-page"><h1>执行记录</h1>{messages.filter(m => m.role === 'assistant').map(m => <AgentTraceTimeline key={m.id} traces={m.traces} plan={m.plan} intent={m.intent} quality={m.quality} />)}</section>
         ) : (
           <ChatWindow
             user={user}
@@ -302,6 +328,7 @@ function App() {
             error={error}
             onSend={sendQuestion}
             onQuickStart={sendQuestion}
+            onStop={stop}
           />
         )}
       </main>
@@ -310,7 +337,11 @@ function App() {
   );
 }
 
-function LoginPanel({ onLogin }) {
+function DatasetBanner({ dataset }) {
+  return <div className="dataset-banner" role="status">{dataset?.success ? `${dataset.mode === 'demo' ? '离线固定场景 · ' : '模型工作流 · '}${dataset.dataset.label} · ${dataset.dataset.min_date} — ${dataset.dataset.max_date} · ${dataset.dataset.flight_cnt.toLocaleString()} 条` : dataset?.error || '正在读取数据状态'}</div>;
+}
+
+function LoginPanel({ onLogin, dataset }) {
   const [userId, setUserId] = useState("guest");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -337,8 +368,9 @@ function LoginPanel({ onLogin }) {
         <p className="eyebrow">Flight Operations Agentic BI</p>
         <h1>航空运营诊断工作台</h1>
         <p className="login-copy">
-          用历史航班和天气数据做运营复盘、异常发现、天气影响归因与行业基准对比。
+          历史运营复盘、异常筛查与行动验证。
         </p>
+        <DatasetBanner dataset={dataset} />
         <form onSubmit={submit} className="login-form">
           <label htmlFor="userId">用户 ID</label>
           <div className="inline-input">
@@ -390,7 +422,7 @@ function Sidebar({
       </nav>
 
       <div className="sidebar-section">
-        <div className="section-title">Recents</div>
+        <div className="section-title">分析主题</div>
         <div className="recent-item">
           <strong>延误率异常诊断</strong>
           <span>机场、航司、天气因素联合分析</span>
@@ -425,24 +457,26 @@ function Sidebar({
   );
 }
 
-function TopBar({ activePanel, onPanelChange }) {
+function TopBar({ activePanel, onPanelChange, onNewSession }) {
   return (
     <header className="topbar">
+      <button className="icon-button mobile-new" title="新会话" aria-label="新会话" onClick={onNewSession}>+</button>
       <div className="segmented" aria-label="workspace sections">
         <button className={activePanel === "Workbench" ? "active" : ""} onClick={() => onPanelChange("Workbench")}>Workbench</button>
         <button className={activePanel === "Trace" ? "active" : ""} onClick={() => onPanelChange("Trace")}>Trace</button>
         <button className={activePanel === "Skills" ? "active" : ""} onClick={() => onPanelChange("Skills")}>Skills</button>
+        <button className={activePanel === "Memory" ? "active" : ""} onClick={() => onPanelChange("Memory")}>Memory</button>
       </div>
     </header>
   );
 }
 
-function ChatWindow({ user, messages, isLoading, error, onSend, onQuickStart }) {
+function ChatWindow({ user, messages, isLoading, error, onSend, onQuickStart, onStop }) {
   const [draft, setDraft] = useState("");
   const hasMessages = messages.length > 0;
 
   const submit = () => {
-    if (!draft.trim()) return;
+    if (!draft.trim() || isLoading) return;
     onSend(draft);
     setDraft("");
   };
@@ -454,7 +488,7 @@ function ChatWindow({ user, messages, isLoading, error, onSend, onQuickStart }) 
       ) : (
         <>
           <MessageList messages={messages} />
-          <Composer draft={draft} setDraft={setDraft} submit={submit} isLoading={isLoading} compact />
+          <Composer draft={draft} setDraft={setDraft} submit={submit} isLoading={isLoading} onStop={onStop} compact />
         </>
       )}
       {error ? <div className="inline-error">{error}</div> : null}
@@ -470,7 +504,7 @@ function StartScreen({ user, draft, setDraft, submit, onQuickStart, isLoading })
     <div className="start-screen">
       <div className="mode-pill">Agentic BI · Operations</div>
       <h1>{greeting}，{user.userId}</h1>
-      <p className="subtitle">面向航空运营团队的历史数据复盘、异常诊断和基准对比工作台。</p>
+      <p className="subtitle">航空运营复盘</p>
       <Composer draft={draft} setDraft={setDraft} submit={submit} isLoading={isLoading} />
       <div className="quick-label">Quick start</div>
       <div className="quick-grid">
@@ -488,7 +522,7 @@ function StartScreen({ user, draft, setDraft, submit, onQuickStart, isLoading })
   );
 }
 
-function Composer({ draft, setDraft, submit, isLoading, compact = false }) {
+function Composer({ draft, setDraft, submit, isLoading, onStop, compact = false }) {
   const textRef = useRef(null);
 
   useEffect(() => {
@@ -505,7 +539,7 @@ function Composer({ draft, setDraft, submit, isLoading, compact = false }) {
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault();
             submit();
           }
@@ -514,9 +548,7 @@ function Composer({ draft, setDraft, submit, isLoading, compact = false }) {
         rows={1}
       />
       <div className="composer-actions">
-        <button className="tool-button" title="SQL evidence">SQL</button>
-        <button className="tool-button" title="Benchmark search">WEB</button>
-        <button className="send-button" onClick={submit} disabled={isLoading || !draft.trim()} title="发送">↑</button>
+        {isLoading ? <button className="send-button" onClick={onStop} title="停止接收" aria-label="停止接收">■</button> : <button className="send-button" onClick={submit} disabled={!draft.trim()} title="发送" aria-label="发送">↑</button>}
       </div>
     </div>
   );
@@ -524,9 +556,10 @@ function Composer({ draft, setDraft, submit, isLoading, compact = false }) {
 
 function MessageList({ messages }) {
   const ref = useRef(null);
+  const followRef = useRef(true);
 
   useEffect(() => {
-    ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: "smooth" });
+    if (followRef.current) ref.current?.scrollTo({ top: ref.current.scrollHeight });
     if (window.hljs) {
       setTimeout(() => {
         ref.current?.querySelectorAll("pre code").forEach((block) => {
@@ -537,7 +570,7 @@ function MessageList({ messages }) {
   }, [messages]);
 
   return (
-    <div className="message-list" ref={ref}>
+    <div className="message-list" ref={ref} onScroll={() => { const el = ref.current; followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }}>
       {messages.map((message) => (
         <MessageBubble key={message.id} message={message} />
       ))}
@@ -557,7 +590,8 @@ function MessageBubble({ message }) {
         {!isUser ? (
           <div className="artifact-stack">
             <AgentTraceTimeline traces={message.traces} plan={message.plan} intent={message.intent} quality={message.quality} />
-            <SQLPanel sql={message.sql} retryCount={message.retryCount} />
+            <SQLPanel sql={message.sql} retryCount={message.retryCount} params={message.sqlParams} />
+            <DecisionPanel decision={message.decision} />
             <ChartPanel chart={message.chart} />
             <SourceList sources={message.sources} />
           </div>
@@ -588,6 +622,7 @@ function AgentTraceTimeline({ traces = [], plan, intent, quality }) {
         {intent ? <div className="trace-chip">Intent: {intent}</div> : null}
         {confidence ? <div className="trace-chip">Confidence: {confidence}</div> : null}
         {score.total !== undefined ? <div className="trace-chip">Score: {score.total}/{score.threshold}</div> : null}
+        {quality?.critic ? <div className="trace-chip">审校：{quality.critic.status}</div> : null}
         {plan ? (
           <div className="plan-box">
             <strong>{plan.goal || "任务计划"}</strong>
@@ -611,14 +646,24 @@ function AgentTraceTimeline({ traces = [], plan, intent, quality }) {
   );
 }
 
-function SQLPanel({ sql, retryCount }) {
+function SQLPanel({ sql, retryCount, params = [] }) {
   if (!sql) return null;
   return (
     <details className="artifact-panel">
       <summary>SQL evidence {retryCount ? `· repaired ${retryCount}x` : ""}</summary>
       <pre><code className="language-sql">{sql}</code></pre>
+      {params.length ? <pre>参数：{JSON.stringify(params)}</pre> : null}
     </details>
   );
+}
+
+function DecisionPanel({ decision }) {
+  if (!decision) return null;
+  return <details className="artifact-panel"><summary>行动依据与情景假设</summary><div className="decision-content">
+    <p>原因完整覆盖率：{decision.diagnosis.component_coverage == null ? '未知' : `${(decision.diagnosis.component_coverage * 100).toFixed(1)}%`}</p>
+    {decision.actions.recommendations.map((r, i) => <div className="decision-row" key={i}><strong>{r.playbook.label}</strong><p>{r.evidence}</p><p>{r.validation}</p></div>)}
+    <p>{decision.actions.impact_estimate.assumption}</p>
+  </div></details>;
 }
 
 function ChartPanel({ chart }) {
@@ -634,9 +679,12 @@ function ChartPanel({ chart }) {
       ...chart,
     });
     const resize = () => instance.resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(ref.current);
     window.addEventListener("resize", resize);
     return () => {
       window.removeEventListener("resize", resize);
+      observer.disconnect();
       instance.dispose();
     };
   }, [chart]);
@@ -646,7 +694,7 @@ function ChartPanel({ chart }) {
 }
 
 function SourceList({ sources = [] }) {
-  const valid = (sources || []).filter(Boolean).slice(0, 5);
+  const valid = (sources || []).filter(url => { try { return ['http:', 'https:'].includes(new URL(url).protocol); } catch { return false; } }).slice(0, 5);
   if (!valid.length) return null;
   return (
     <div className="source-list">
@@ -670,7 +718,7 @@ function MemoryPanel({ userInfo, onRefresh, onReset }) {
         <div>
           <p className="eyebrow">Memory</p>
           <h1>长期记忆</h1>
-          <p>展示用户偏好和知识沉淀，便于说明 Agent 的上下文管理能力。</p>
+          <p>当前用户的偏好与已保存上下文。</p>
         </div>
         <div className="panel-actions">
           <button onClick={onRefresh}>刷新</button>
@@ -712,7 +760,7 @@ function SkillPanel({ skills }) {
         <div>
           <p className="eyebrow">Registry</p>
           <h1>Skill Registry</h1>
-          <p>用轻量声明式配置展示工具边界、输入输出和权限要求。</p>
+          <p>可用分析能力与权限范围。</p>
         </div>
       </div>
       <div className="skill-grid">

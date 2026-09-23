@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "contract": "Recent N calendar days include MAX(FL_DATE); arrivals exclude cancelled/diverted/missing; projection order is specified by question.",
+  "cases": [
+    {"id":"g01","question":"最近30天（含数据最大日期当天）出发延误超过60分钟的航班数是多少？只返回数量。","expected_sql":"SELECT COUNT(*) FROM flights_enriched WHERE DEP_DELAY>60 AND CANCELLED=0 AND FL_DATE>=date((SELECT MAX(FL_DATE) FROM flights_enriched),'-29 days')"},
+    {"id":"g02","question":"最近90天（含数据最大日期）取消的航班数量？只返回数量。","expected_sql":"SELECT COUNT(*) FROM flights_enriched WHERE CANCELLED=1 AND FL_DATE>=date((SELECT MAX(FL_DATE) FROM flights_enriched),'-89 days')"},
+    {"id":"g03","question":"按正到达延误分钟总量降序列出前5个到达机场，排除取消、备降和缺失到达；依次返回DEST和正延误分钟。并列按DEST升序。","expected_sql":"SELECT DEST,SUM(MAX(ARR_DELAY,0)) FROM flights_enriched WHERE CANCELLED=0 AND DIVERTED=0 AND ARR_DELAY IS NOT NULL GROUP BY DEST ORDER BY 2 DESC,DEST LIMIT 5","ordered":true},
+    {"id":"g04","question":"出发地降水prcp_ORIGIN大于5的航班有多少？只返回数量。","expected_sql":"SELECT COUNT(*) FROM flights_enriched WHERE prcp_ORIGIN>5"},
+    {"id":"g05","question":"2025年1月1日非取消航班的平均出发延误分钟是多少？排除缺失值，只返回平均值。","expected_sql":"SELECT AVG(DEP_DELAY) FROM flights_enriched WHERE FL_DATE='2025-01-01' AND CANCELLED=0"},
+    {"id":"g06","question":"2025年2月取消率最高的出发机场？依次返回ORIGIN和取消率。取消率分母为取消状态已知的计划航班，并列按ORIGIN升序。","expected_sql":"SELECT ORIGIN,AVG(CANCELLED*1.0) FROM flights_enriched WHERE FL_DATE>='2025-02-01' AND FL_DATE<'2025-03-01' GROUP BY ORIGIN ORDER BY 2 DESC,ORIGIN LIMIT 1","ordered":true},
+    {"id":"g07","question":"2025年3月有任一出发或到达降水大于1的航班记录的不同日期数？只返回数量，不做因果推断。","expected_sql":"SELECT COUNT(DISTINCT FL_DATE) FROM flights_enriched WHERE (prcp_ORIGIN>1 OR prcp_DEST>1) AND FL_DATE>='2025-03-01' AND FL_DATE<'2025-04-01'"},
+    {"id":"g08","question":"全库计划航班总数、取消数，按这个顺序返回两列。","expected_sql":"SELECT COUNT(*),SUM(CANCELLED) FROM flights_enriched"},
+    {"id":"g09","question":"列出到达延误率最高的3家航司，延误定义为ARR_DELAY>=15，分母排除取消、备降、缺失到达。依次返回航司代码和比例，并列按航司代码升序。","expected_sql":"SELECT OP_UNIQUE_CARRIER,AVG(CASE WHEN ARR_DELAY>=15 THEN 1.0 ELSE 0.0 END) FROM flights_enriched WHERE CANCELLED=0 AND DIVERTED=0 AND ARR_DELAY IS NOT NULL GROUP BY OP_UNIQUE_CARRIER ORDER BY 2 DESC,OP_UNIQUE_CARRIER LIMIT 3","ordered":true},
+    {"id":"g10","question":"取消且任一出发或到达地降水大于0的航班数量是多少？只统计同时出现，不认为是天气导致。","expected_sql":"SELECT COUNT(*) FROM flights_enriched WHERE CANCELLED=1 AND (prcp_ORIGIN>0 OR prcp_DEST>0)"},
+    {"id":"g11","question":"按ORIGIN、DEST分组，列出航班量超过100的航线。依次返回ORIGIN、DEST、航班量。","expected_sql":"SELECT ORIGIN,DEST,COUNT(*) FROM flights_enriched GROUP BY ORIGIN,DEST HAVING COUNT(*)>100"},
+    {"id":"g12","question":"全库出发或到达降水存在缺失的航班数量？只返回数量。","expected_sql":"SELECT COUNT(*) FROM flights_enriched WHERE prcp_ORIGIN IS NULL OR prcp_DEST IS NULL"},
+    {"id":"g13","question":"最近7个自然日（含最大日期）的计划航班数？只返回数量。","expected_sql":"SELECT COUNT(*) FROM flights_enriched WHERE FL_DATE>=date((SELECT MAX(FL_DATE) FROM flights_enriched),'-6 days')"},
+    {"id":"g14","question":"全库到达延误分钟的最小值、最大值，依次返回两列。","expected_sql":"SELECT MIN(ARR_DELAY),MAX(ARR_DELAY) FROM flights_enriched"},
+    {"id":"g15","question":"全库有效到达航班中，报告前序飞机晚到的总分钟数是多少？排除取消和备降；只返回一个值，不将其视为航司过错。","expected_sql":"SELECT SUM(LATE_AIRCRAFT_DELAY) FROM flights_enriched WHERE CANCELLED=0 AND DIVERTED=0 AND ARR_DELAY IS NOT NULL"}
+  ]
+}

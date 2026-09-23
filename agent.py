@@ -14,6 +14,7 @@ LangGraph智能问答Agent - 多智能体版本
 
 import os
 import uuid
+from pathlib import Path
 from typing import Dict, Any
 
 from langchain_openai import ChatOpenAI
@@ -39,12 +40,17 @@ class MultiAgentSystem:
             config_path: 配置文件路径
         """
         self.config = self._load_config(config_path)
-        self.llm = self._init_llm()
-        self.db_path = self.config["database"]["path"]
+        self.demo = os.getenv('APP_MODE', 'live') == 'demo'
+        self.llm = None if self.demo else self._init_llm()
+        root = Path(__file__).resolve().parent
+        default_db = 'data/demo_operations.db' if self.demo else self.config['database']['path']
+        self.db_path = str((root / os.getenv('FLIGHT_DB_PATH', default_db)).resolve())
+        if not Path(self.db_path).is_file():
+            raise ValueError(f'数据库不存在：{self.db_path}。请先运行初始化脚本。')
         
         # 记忆配置
         memory_config = self.config.get("memory", {})
-        memory_db_path = memory_config.get("long_term_db", "./data/long_term_memory.db")
+        memory_db_path = str((root / os.getenv('MEMORY_DB_PATH', memory_config.get("long_term_db", "./data/long_term_memory.db"))).resolve())
         short_term_max_tokens = memory_config.get("short_term_max_tokens", 1000)
         
         # 联网搜索配置
@@ -58,7 +64,8 @@ class MultiAgentSystem:
             num_examples=self.config["nl2sql"]["num_examples"],
             memory_db_path=memory_db_path,
             short_term_max_tokens=short_term_max_tokens,
-            tavily_api_key=tavily_api_key
+            tavily_api_key=tavily_api_key,
+            demo=self.demo
         )
         
         # 用户登录状态
@@ -67,7 +74,7 @@ class MultiAgentSystem:
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """加载配置文件"""
-        with open(config_path, 'r', encoding='utf-8') as f:
+        with open(Path(__file__).resolve().parent / config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
         
         # 替换环境变量
@@ -75,10 +82,14 @@ class MultiAgentSystem:
             if isinstance(obj, dict):
                 return {k: replace_env_vars(v) for k, v in obj.items()}
             if isinstance(obj, str) and obj.startswith("${") and obj.endswith("}"):
-                return os.getenv(obj[2:-1], obj)
+                return os.getenv(obj[2:-1], '')
             return obj
         
-        return replace_env_vars(config)
+        config = replace_env_vars(config)
+        llm_config = config.get("llm", {})
+        if not llm_config.get("api_key"):
+            llm_config["api_key"] = os.getenv("DASHSCOPE_API_KEY", "")
+        return config
     
     def _init_llm(self) -> BaseChatModel:
         """初始化语言模型
@@ -87,6 +98,8 @@ class MultiAgentSystem:
         （qwen-turbo-latest / qwen-plus-latest / qwen-max-latest / qwen3.5-plus 等）
         """
         llm_config = self.config["llm"]
+        if not llm_config.get('api_key'):
+            raise ValueError('未设置 QWEN_API_KEY；兼容 DASHSCOPE_API_KEY。离线演示可使用 APP_MODE=demo。')
         
         if llm_config["provider"] == "dashscope":
             base_url = llm_config.get(
@@ -94,12 +107,14 @@ class MultiAgentSystem:
                 "https://dashscope.aliyuncs.com/compatible-mode/v1"
             )
             return ChatOpenAI(
-                model=llm_config["model"],
+                model=os.getenv('LLM_MODEL', llm_config["model"]),
                 api_key=llm_config["api_key"],
-                base_url=base_url,
+                base_url=os.getenv('LLM_BASE_URL', base_url),
                 temperature=llm_config["temperature"],
                 max_tokens=llm_config["max_tokens"],
                 streaming=True,
+                timeout=45,
+                max_retries=0,
             )
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_config['provider']}")
@@ -212,8 +227,8 @@ def main():
     ))
     console.print()
     
-    if not os.getenv("DASHSCOPE_API_KEY"):
-        console.print("[red]错误：未设置 DASHSCOPE_API_KEY 环境变量[/red]")
+    if not (os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")):
+        console.print("[red]错误：未设置 QWEN_API_KEY 环境变量（兼容 DASHSCOPE_API_KEY）[/red]")
         return
     
     # 初始化系统

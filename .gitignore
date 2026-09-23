@@ -56,3 +56,6 @@ coverage.xml
 
 # ===== 实验日志 =====
 swanlab/
+data/traces/
+eval/results/live-*.json
+artifacts/

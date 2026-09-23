@@ -9,6 +9,8 @@ import argparse
 import csv
 import os
 import sqlite3
+import tempfile
+from pathlib import Path
 from typing import Dict, List, Tuple, Any
 
 
@@ -122,6 +124,14 @@ def create_schema(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_flights_dest ON flights_enriched(DEST)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_flights_cancelled ON flights_enriched(CANCELLED)")
 
+    create_kpi_view(conn)
+    conn.commit()
+
+
+def create_kpi_view(conn: sqlite3.Connection) -> None:
+    """Refresh the metric contract without changing source rows."""
+    cur = conn.cursor()
+
     cur.execute("DROP VIEW IF EXISTS v_flight_monthly_kpi")
     cur.execute(
         """
@@ -130,12 +140,12 @@ def create_schema(conn: sqlite3.Connection) -> None:
             substr(FL_DATE, 1, 7) AS ym,
             OP_UNIQUE_CARRIER,
             COUNT(*) AS flight_cnt,
-            AVG(COALESCE(DEP_DELAY, 0)) AS avg_dep_delay,
-            AVG(COALESCE(ARR_DELAY, 0)) AS avg_arr_delay,
-            AVG(COALESCE(DEP_DEL15, 0)) AS dep_delay_rate,
-            AVG(COALESCE(ARR_DEL15, 0)) AS arr_delay_rate,
-            AVG(COALESCE(CANCELLED, 0)) AS cancel_rate,
-            AVG(COALESCE(DIVERTED, 0)) AS divert_rate
+            AVG(CASE WHEN CANCELLED=0 THEN DEP_DELAY END) AS avg_dep_delay,
+            AVG(CASE WHEN CANCELLED=0 AND DIVERTED=0 THEN ARR_DELAY END) AS avg_arr_delay,
+            AVG(CASE WHEN CANCELLED=0 AND DEP_DELAY IS NOT NULL THEN CASE WHEN DEP_DELAY>=15 THEN 1.0 ELSE 0.0 END END) AS dep_delay_rate,
+            AVG(CASE WHEN CANCELLED=0 AND DIVERTED=0 AND ARR_DELAY IS NOT NULL THEN CASE WHEN ARR_DELAY>=15 THEN 1.0 ELSE 0.0 END END) AS arr_delay_rate,
+            AVG(CASE WHEN CANCELLED IN (0,1) THEN CANCELLED * 1.0 END) AS cancel_rate,
+            AVG(CASE WHEN DIVERTED IN (0,1) THEN DIVERTED * 1.0 END) AS divert_rate
         FROM flights_enriched
         GROUP BY ym, OP_UNIQUE_CARRIER
         ORDER BY ym, OP_UNIQUE_CARRIER
@@ -145,13 +155,22 @@ def create_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def import_csv(csv_path: str, db_path: str) -> None:
+def import_csv(csv_path: str, db_path: str, replace: bool = False) -> None:
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    if Path(db_path).exists() and not replace:
+        raise FileExistsError('Database exists. Use --replace only to explicitly rebuild it.')
+    with open(csv_path, encoding='utf-8', newline='') as handle:
+        header = next(csv.reader(handle), [])
+    required = {'FL_DATE', 'ORIGIN', 'DEST', 'ARR_DELAY', 'CANCELLED', 'DIVERTED'}
+    if not required.issubset(header):
+        raise ValueError('Invalid CSV header (possibly a Git LFS pointer). Run git lfs pull, or use demo mode.')
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(db_path)
+    fd, temporary = tempfile.mkstemp(prefix=Path(db_path).name+'.', suffix='.tmp', dir=Path(db_path).parent)
+    os.close(fd)
+    conn = sqlite3.connect(temporary)
     try:
         create_schema(conn)
         cur = conn.cursor()
@@ -191,6 +210,10 @@ def import_csv(csv_path: str, db_path: str) -> None:
             FROM flights_enriched
             """
         ).fetchone()
+        if inserted == 0:
+            raise ValueError('CSV contains no data rows; destination was not changed')
+        conn.close()
+        os.replace(temporary, db_path)
 
         print("=" * 72)
         print("Flight+Weather DB initialized successfully")
@@ -205,18 +228,21 @@ def import_csv(csv_path: str, db_path: str) -> None:
         print("=" * 72)
     finally:
         conn.close()
+        if Path(temporary).exists():
+            Path(temporary).unlink()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Initialize flight weather SQLite database")
     parser.add_argument("--csv", default=DEFAULT_CSV_PATH, help="Path to source CSV")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Path to target SQLite DB")
+    parser.add_argument('--replace', action='store_true', help='Explicitly rebuild an existing database')
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    import_csv(csv_path=args.csv, db_path=args.db)
+    import_csv(csv_path=args.csv, db_path=args.db, replace=args.replace)
 
 
 if __name__ == "__main__":

@@ -54,6 +54,16 @@ class LongTermMemory:
         conn.row_factory = sqlite3.Row  # 返回字典形式的结果
         return conn
 
+    def clear_user_memory(self, user_id):
+        """Delete only the active user's persisted context in one transaction."""
+        conn = self._get_connection()
+        try:
+            with conn:
+                conn.execute('DELETE FROM user_preferences WHERE user_id=?', (user_id,))
+                conn.execute('DELETE FROM user_knowledge WHERE user_id=?', (user_id,))
+        finally:
+            conn.close()
+
     @staticmethod
     def _tokenize(text: str) -> List[str]:
         """将文本切分为中英文 token。"""
@@ -496,4 +506,3 @@ class LongTermMemory:
             return False
         finally:
             conn.close()
-
